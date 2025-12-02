@@ -174,6 +174,11 @@ def main():
             # 셀 안에 상관계수 숫자 텍스트 (소수 둘째자리)
             text = corr.round(2).astype(str).values
 
+            n_rows, n_cols = corr.shape
+            base = 800
+            width = base
+            height = int(base * (n_rows / n_cols))  # 셀을 정사각형에 가깝게
+
             fig_corr = go.Figure(
                 data=go.Heatmap(
                     z=corr.values,
@@ -197,11 +202,14 @@ def main():
                     tickangle=45,
                 ),
                 yaxis=dict(autorange="reversed"),
+                width=width,
+                height=height,
                 margin=dict(l=80, r=20, t=80, b=80),
             )
-            st.plotly_chart(fig_corr, use_container_width=True)
+            # 컨테이너 폭에 맞추지 않고 고정 사이즈 사용 → 셀 정사각형 유지
+            st.plotly_chart(fig_corr, use_container_width=False)
 
-            # 공급량과의 상관계수 테이블 (옵션)
+            # 공급량과의 상관계수 테이블
             target_col = None
             for c in num_cols:
                 if "공급량" in str(c):
@@ -212,8 +220,20 @@ def main():
 
             if target_col in corr.columns:
                 st.markdown(f"**기준 변수: `{target_col}` 과(와) 다른 변수들의 상관계수**")
-                target_series = corr[target_col].drop(target_col).sort_values(ascending=False)
-                st.dataframe(target_series.round(3).to_frame(name="상관계수"))
+
+                target_series = corr[target_col].drop(target_col)
+
+                # |상관계수|가 큰 순서대로 (양·음 상관 모두 포함)
+                target_series = target_series.reindex(
+                    target_series.abs().sort_values(ascending=False).index
+                )
+
+                tbl_df = target_series.round(3).to_frame(name="상관계수")
+
+                # 가로 폭을 줄이기 위해 왼쪽 1/4 컬럼에만 출력
+                col_tbl, _ = st.columns([1, 3])
+                with col_tbl:
+                    st.dataframe(tbl_df, height=400)
         else:
             st.caption("숫자 컬럼이 2개 미만이라 상관도 분석을 할 수 없어.")
 
@@ -511,7 +531,7 @@ def main():
     col_mat_slider, col_mat_month = st.columns([2, 1])  # 슬라이더 2/3, 월 선택 1/3
     with col_mat_slider:
         mat_start, mat_end = st.slider(
-            "연도 범위",
+            "연도 범위 (실제 데이터가 있는 연도만 표시됨)",
             min_value=mat_slider_min,
             max_value=max_year,
             value=(mat_default_start, max_year),
@@ -524,6 +544,7 @@ def main():
             index=9,  # 기본 10월
         )
 
+    # 선택된 범위에 해당하는 데이터만 사용
     df_mat = df[(df["연도"].between(mat_start, mat_end)) & (df["월"] == month_sel)].copy()
     if df_mat.empty:
         st.write("선택한 연도/월 범위에 대한 기온 데이터가 없어.")
@@ -540,6 +561,13 @@ def main():
         .sort_index(axis=1)
     )
 
+    # 셀을 정사각형에 가깝게 만들기 위해 행/열 비율로 높이 조정
+    rows = len(pivot.index)
+    cols = len(pivot.columns)
+    base_w = 900
+    width_hm = base_w
+    height_hm = int(base_w * (rows / cols))
+
     fig_hm = go.Figure(
         data=go.Heatmap(
             z=pivot.values,
@@ -554,10 +582,12 @@ def main():
         title=f"기온 매트릭스 — {month_sel}월 기준 (선택 연도 {mat_start}~{mat_end})",
         xaxis_title="연도",
         yaxis_title="일",
+        width=width_hm,
+        height=height_hm,
         margin=dict(l=20, r=20, t=40, b=40),
     )
 
-    st.plotly_chart(fig_hm, use_container_width=True)
+    st.plotly_chart(fig_hm, use_container_width=False)
 
 
 if __name__ == "__main__":
