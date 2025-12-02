@@ -126,7 +126,8 @@ def format_table_daily(df):
     for col in ["공급량(MJ)", "예측공급량_MJ", "오차_MJ"]:
         if col in df.columns:
             df[col] = df[col].map(lambda x: f"{x:,.0f}")
-    if "오차율_%"] in df.columns:
+    # ● 여기 오타 수정: "]" 제거
+    if "오차율_%" in df.columns:
         df["오차율_%"] = df["오차율_%"].map(lambda x: f"{x:.2f}")
         df = df.rename(columns={"오차율_%": "오차율(%)"})
     return df
@@ -161,7 +162,7 @@ def main():
     max_year = int(df["연도"].max())
     max_window = min(10, max_year - min_year + 1)
 
-    # ── ① 학습기간 선택 (bar 형태: radio) ──────
+    # ── ① 학습기간 선택 (radio; bar 느낌) ──────
     st.markdown("#### ① 모델 학습에 사용할 최근 연수 선택")
     year_options = list(range(1, max_window + 1))
     year_window = st.radio(
