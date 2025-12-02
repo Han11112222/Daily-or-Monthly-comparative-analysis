@@ -168,12 +168,12 @@ def make_daily_plan_table(
     recent_window: int = 3,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None, list[int]]:
     """
-    최근 recent_window년(예: 2023~2025) 같은 월의 일별 공급 패턴으로
+    최근 recent_window년 같은 월의 일별 공급 패턴으로
     target_year/target_month 일별 비율과 일별 계획 공급량을 계산.
     반환:
       df_result : 대상 연/월 일별 계획 테이블
       df_mat    : 최근 n년 일별 실적 매트릭스 (Heatmap용)
-      recent_years : 사용된 최근 연도 리스트
+      recent_years : 실제로 사용된 최근 연도 리스트
     """
     # 사용 가능한 연도 범위
     all_years = sorted(df_daily["연도"].unique())
@@ -243,7 +243,7 @@ def make_daily_plan_table(
     daily_sum["요일"] = dates.dt.weekday.map(lambda i: weekday_names[i])
 
     daily_sum["is_weekend"] = dates.dt.weekday >= 5
-    daily_sum["공휴일여부"] = False  # holidays 라이브러리 없이 공휴일은 일단 미사용
+    daily_sum["공휴일여부"] = False  # holidays 패키지 없이 공휴일은 일단 미사용
 
     def _label(row):
         return "주말" if row["is_weekend"] else "평일"
@@ -251,7 +251,7 @@ def make_daily_plan_table(
     daily_sum["구분(평일/주말)"] = daily_sum.apply(_label, axis=1)
 
     # 정렬 및 컬럼 순서
-    daily_sum = daily_sum.sort_values("일").reset_index(drop=True)
+    daily_sum = daily_sum.sort_values("일").reset_index(drop_index=True)
     daily_sum = daily_sum[
         [
             "연",
@@ -284,7 +284,7 @@ def make_daily_plan_table(
 # 탭1: Daily 공급량 분석
 # ─────────────────────────────────────────────
 def tab_daily_plan(df_daily: pd.DataFrame):
-    st.subheader("📅 Daily 공급량 분석 — 최근 3년 패턴 기반 일별 계획")
+    st.subheader("📅 Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획")
 
     df_plan = load_monthly_plan()
 
@@ -302,8 +302,27 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             "계획 월 선택", months_plan, index=default_month_idx, format_func=lambda m: f"{m}월"
         )
 
+    # 사용할 수 있는 과거 연도 수에 따라 슬라이더 범위 설정
+    all_years = sorted(df_daily["연도"].unique())
+    hist_years = [y for y in all_years if y < target_year]
+    if len(hist_years) < 3:
+        st.warning("이 연도·월은 과거 데이터가 3년 미만이라 최근 N년 분석을 할 수 없어.")
+        return
+
+    slider_min = 3
+    slider_max = min(10, len(hist_years))
+
+    recent_window = st.slider(
+        "최근 몇 년 평균으로 비율을 계산할까?",
+        min_value=slider_min,
+        max_value=slider_max,
+        value=3,
+        step=1,
+        help="예: 3년을 선택하면 대상연도 직전 3개 연도(예: 2023~2025년)의 같은 월 데이터를 사용",
+    )
+
     st.caption(
-        f"최근 **{target_year-3}년 ~ {target_year-1}년**까지의 "
+        f"최근 **{recent_window}년** ({target_year-recent_window}년 ~ {target_year-1}년) "
         f"{target_month}월 일별 공급 패턴으로 **{target_year}년 {target_month}월** 일별 계획을 계산."
     )
 
@@ -312,12 +331,18 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         df_plan=df_plan,
         target_year=target_year,
         target_month=target_month,
-        recent_window=3,
+        recent_window=recent_window,
     )
 
     if df_result is None or len(recent_years) == 0:
-        st.warning("해당 연도/월에 대해 최근 3년 기준으로 계산할 수 있는 데이터가 없어.")
+        st.warning("해당 연도/월에 대해 선택한 최근 N년 기준으로 계산할 수 있는 데이터가 없어.")
         return
+
+    # 실제로 사용된 연도 범위 안내
+    st.markdown(
+        f"- 실제 사용된 과거 연도: **{min(recent_years)}년 ~ {max(recent_years)}년** "
+        f"(총 {len(recent_years)}개 연도)"
+    )
 
     plan_total = df_result["예상공급량(MJ)"].sum()
     st.markdown(
@@ -372,13 +397,16 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             x=view["일"],
             y=view["일별비율"],
             mode="lines+markers",
-            name="일별비율 (최근3년)",
+            name=f"일별비율 (최근{recent_window}년)",
             yaxis="y2",
         )
     )
 
     fig.update_layout(
-        title=f"{target_year}년 {target_month}월 일별 공급량 계획 (최근3년 {target_month}월 비율 기반)",
+        title=(
+            f"{target_year}년 {target_month}월 일별 공급량 계획 "
+            f"(최근{recent_window}년 {target_month}월 비율 기반)"
+        ),
         xaxis_title="일",
         yaxis=dict(title="예상 공급량 (MJ)"),
         yaxis2=dict(
@@ -391,8 +419,8 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # 3. 매트릭스(Heatmap) — 최근 3년 일별 실적
-    st.markdown("#### 3. 최근 3년 일별 실적 매트릭스")
+    # 3. 매트릭스(Heatmap) — 최근 N년 일별 실적
+    st.markdown("#### 3. 최근 N년 일별 실적 매트릭스")
 
     if df_mat is not None:
         fig_hm = go.Figure(
@@ -529,14 +557,14 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
                 )
                 tbl_df = target_series.round(3).to_frame(name="상관계수")
 
-                col_hm, col_tbl = st.columns([3, 1])
-                with col_hm:
-                    st.plotly_chart(fig_corr, use_container_width=False)
-                with col_tbl:
-                    st.markdown(
-                        f"**기준 변수: `{target_col}` 과(와) 다른 변수들의 상관계수**"
-                    )
-                    st.table(center_style(tbl_df))
+            col_hm, col_tbl = st.columns([3, 1])
+            with col_hm:
+                st.plotly_chart(fig_corr, use_container_width=False)
+            with col_tbl:
+                st.markdown(
+                    f"**기준 변수: `{target_col}` 과(와) 다른 변수들의 상관계수**"
+                )
+                st.table(center_style(tbl_df))
         else:
             st.caption("숫자 컬럼이 2개 미만이라 상관도 분석을 할 수 없어.")
 
