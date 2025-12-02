@@ -1,5 +1,3 @@
-# app.py — Daily vs Monthly Polynomial (3차) R² & 월 비교 (슬라이더 버전)
-
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -35,9 +33,10 @@ def load_daily_data() -> pd.DataFrame:
     # 결측 제거
     df = df.dropna(subset=["공급량(MJ)", "평균기온(℃)"])
 
-    # 연도/월 파생
+    # 연/월/일 파생
     df["연도"] = df["일자"].dt.year
     df["월"] = df["일자"].dt.month
+    df["일"] = df["일자"].dt.day
 
     return df
 
@@ -162,17 +161,20 @@ def main():
     min_year = int(df["연도"].min())
     max_year = int(df["연도"].max())
 
-    # ── 1. 데이터 학습기간 bar (연도 범위 슬라이더) ──────
+    # ── ① 데이터 학습기간 bar (연도 범위 슬라이더 / 폭 1/2) ──────
     st.subheader("① 데이터 학습기간 선택 (3차 다항식 R² 계산용)")
 
-    default_start = max(min_year, max_year - 4)
-    train_start, train_end = st.slider(
-        "학습에 사용할 연도 범위",
-        min_value=min_year,
-        max_value=max_year,
-        value=(default_start, max_year),
-        step=1,
-    )
+    train_default_start = max(min_year, max_year - 4)
+
+    col_train, _ = st.columns([1, 1])  # 슬라이더를 화면의 왼쪽 1/2만 사용
+    with col_train:
+        train_start, train_end = st.slider(
+            "학습에 사용할 연도 범위",
+            min_value=min_year,
+            max_value=max_year,
+            value=(train_default_start, max_year),
+            step=1,
+        )
 
     st.caption(f"현재 학습 구간: **{train_start}년 ~ {train_end}년**")
 
@@ -257,87 +259,23 @@ def main():
             )
             st.plotly_chart(fig_d, use_container_width=True)
 
-    # ── 선택 연·월 상세 비교 (학습기간 내부) ──────────
-    st.subheader("선택 연·월 기준 예측 vs 실적 상세 비교 (학습기간 내)")
+    # (요청대로: 연·월 상세 비교 섹션은 삭제)
 
-    year_list = sorted(df_window["연도"].unique())
-    sel_year = st.selectbox("연도 선택", year_list, index=len(year_list) - 1)
-
-    month_list = sorted(df_window.loc[df_window["연도"] == sel_year, "월"].unique())
-    sel_month = st.selectbox("월 선택", month_list)
-
-    st.markdown(f"**선택 월: {sel_year}년 {sel_month}월**")
-
-    # 월 단위 한 줄 요약
-    month_row = df_month[
-        (df_month["연도"] == sel_year) & (df_month["월"] == sel_month)
-    ]
-
-    if not month_row.empty:
-        r = month_row.iloc[0].copy()
-        r["오차_MJ"] = r["공급량_MJ"] - r["예측공급량_MJ"]
-        r["오차율_%"] = r["오차_MJ"] / r["공급량_MJ"] * 100
-
-        st.markdown("##### 월 단위 합계 비교")
-        summary_df = pd.DataFrame(
-            {
-                "연도": [r["연도"]],
-                "월": [r["월"]],
-                "월평균 기온(℃)": [round(r["평균기온"], 2)],
-                "실제 공급량(MJ)": [round(r["공급량_MJ"], 0)],
-                "예측 공급량(MJ)": [round(r["예측공급량_MJ"], 0)],
-                "오차(MJ)": [round(r["오차_MJ"], 0)],
-                "오차율(%)": [round(r["오차율_%"], 2)],
-            }
-        )
-        summary_df = format_table_month_summary(summary_df)
-        st.table(summary_df)
-
-    # 일 단위 상세
-    st.markdown("##### 일 단위 상세 비교 (선택 연·월, 학습기간 내)")
-
-    df_month_days = df_window[
-        (df_window["연도"] == sel_year) & (df_window["월"] == sel_month)
-    ].copy()
-
-    if not df_month_days.empty and "예측공급량_MJ" in df_month_days.columns:
-        df_month_days["오차_MJ"] = (
-            df_month_days["공급량(MJ)"] - df_month_days["예측공급량_MJ"]
-        )
-        df_month_days["오차율_%"] = (
-            df_month_days["오차_MJ"] / df_month_days["공급량(MJ)"] * 100
-        )
-
-        show_cols = [
-            "일자",
-            "평균기온(℃)",
-            "공급량(MJ)",
-            "예측공급량_MJ",
-            "오차_MJ",
-            "오차율_%"
-        ]
-
-        view_daily = (
-            df_month_days[show_cols]
-            .sort_values("일자")
-            .reset_index(drop=True)
-        )
-        view_daily = format_table_daily(view_daily)
-        st.dataframe(view_daily)
-    else:
-        st.write("선택한 연·월에 대한 일별 예측 데이터가 없어.")
-
-    # ── 2. 기온선택 bar (시나리오용) ─────────────────
+    # ── ② 기온 시나리오 bar (연도 범위 슬라이더 / 폭 1/2) ───────────
     st.subheader("② 기온 시나리오 연도 범위 선택 (월평균 vs 일평균 예측 비교용)")
 
     scen_default_start = max(min_year, max_year - 4)
-    scen_start, scen_end = st.slider(
-        "기온 시나리오에 사용할 연도 범위",
-        min_value=min_year,
-        max_value=max_year,
-        value=(scen_default_start, max_year),
-        step=1,
-    )
+
+    col_scen, _ = st.columns([1, 1])  # 슬라이더를 화면의 왼쪽 1/2만 사용
+    with col_scen:
+        scen_start, scen_end = st.slider(
+            "기온 시나리오에 사용할 연도 범위",
+            min_value=min_year,
+            max_value=max_year,
+            value=(scen_default_start, max_year),
+            step=1,
+        )
+
     st.caption(
         f"선택한 기온 시나리오 연도: **{scen_start}년 ~ {scen_end}년** "
         "(각 월별로 이 기간의 평균기온을 사용)"
@@ -365,7 +303,8 @@ def main():
             name=f"월단위 Poly-3 예측(MJ) - 기온 {scen_start}~{scen_end}년 평균",
         )
 
-    # 일단위 모델로 예측한 일별 공급량 → 월별 합산 (시나리오 기온)
+    # 일단위 모델로 예측한 일별 공급량 → 월별 합산
+    # (여러 년도의 월별 합계를 연도별로 구한 뒤, 월별 '연평균'을 사용)
     monthly_pred_from_daily_model = None
     if coef_d is not None:
         df_scen = df_scen.copy()
@@ -373,10 +312,20 @@ def main():
             coef_d,
             df_scen["평균기온(℃)"].to_numpy(),
         )
-        monthly_pred_from_daily_model = (
+
+        # 연도×월별 합산
+        monthly_daily_by_year = (
             df_scen
-            .groupby("월")["예측일공급량_MJ_from_daily"]
+            .groupby(["연도", "월"])["예측일공급량_MJ_from_daily"]
             .sum()
+            .reset_index()
+        )
+
+        # 월별 평균 (연도 수로 나눠서 "연간 평균 1년치" 월별 공급량으로 환산)
+        monthly_pred_from_daily_model = (
+            monthly_daily_by_year
+            .groupby("월")["예측일공급량_MJ_from_daily"]
+            .mean()
             .sort_index()
         )
         monthly_pred_from_daily_model.name = (
@@ -387,11 +336,13 @@ def main():
     st.markdown("##### 예측/실적 연도 선택")
 
     year_options = sorted(df["연도"].unique())
-    pred_year = st.selectbox(
-        "실제 월별 공급량을 확인할 연도",
-        options=year_options,
-        index=len(year_options) - 1,
-    )
+    col_pred_year, _ = st.columns([1, 3])  # 선택 박스 폭을 줄이기 위해 1/4만 사용
+    with col_pred_year:
+        pred_year = st.selectbox(
+            "실제 월별 공급량을 확인할 연도",
+            options=year_options,
+            index=len(year_options) - 1,
+        )
 
     df_actual_year = df[df["연도"] == pred_year].copy()
     monthly_actual = None
@@ -447,7 +398,7 @@ def main():
         xaxis=dict(
             tickmode="array",
             tickvals=month_index,
-            ticktext=[f'{m}월' for m in month_index],
+            ticktext=[f"{m}월" for m in month_index],
         ),
         margin=dict(l=20, r=20, t=40, b=20),
     )
@@ -455,10 +406,96 @@ def main():
     st.plotly_chart(fig_line, use_container_width=True)
 
     st.markdown("##### 월별 실적/예측 수치표")
+
     df_compare_view = df_compare.copy()
     df_compare_view.index = [f"{m}월" for m in df_compare_view.index]
     df_compare_view = format_table_generic(df_compare_view)
     st.dataframe(df_compare_view)
+
+    # ── 월별 소계 (연간 합계 및 오차율) ──────────────────
+    if (
+        (monthly_actual is not None)
+        and (monthly_pred_from_month_model is not None)
+        and (monthly_pred_from_daily_model is not None)
+    ):
+        total_actual = monthly_actual.sum()
+        total_month_pred = monthly_pred_from_month_model.sum()
+        total_daily_pred = monthly_pred_from_daily_model.sum()
+
+        summary_df = pd.DataFrame(
+            {
+                "구분": ["실적", "월단위 Poly-3 예측", "일단위 Poly-3 예측합"],
+                "연간 공급량(MJ)": [total_actual, total_month_pred, total_daily_pred],
+            }
+        )
+        summary_df["실적대비 차이(MJ)"] = summary_df["연간 공급량(MJ)"] - total_actual
+        summary_df["실적대비 오차율(%)"] = (
+            summary_df["실적대비 차이(MJ)"] / total_actual * 100
+        )
+
+        st.markdown("###### 연간 소계 (실적 vs 예측, 실적대비 차이·오차율)")
+        summary_view = format_table_generic(
+            summary_df,
+            percent_cols=["실적대비 오차율(%)"],
+        )
+        st.table(summary_view)
+
+    # ── ③ 기온 매트릭스 (일별 평균기온) ─────────────────
+    st.subheader("③ 기온 매트릭스 (일별 평균기온)")
+
+    mat_default_start = max(min_year, max_year - 20)
+
+    col_mat_slider, col_mat_month = st.columns([1, 1])  # 슬라이더 폭 1/2
+    with col_mat_slider:
+        mat_start, mat_end = st.slider(
+            "연도 범위",
+            min_value=min_year,
+            max_value=max_year,
+            value=(mat_default_start, max_year),
+            step=1,
+        )
+    with col_mat_month:
+        month_sel = st.selectbox(
+            "월 선택",
+            list(range(1, 12 + 1)),
+            index=9,  # 기본 10월
+        )
+
+    df_mat = df[(df["연도"].between(mat_start, mat_end)) & (df["월"] == month_sel)].copy()
+    if df_mat.empty:
+        st.write("선택한 연도/월 범위에 대한 기온 데이터가 없어.")
+        return
+
+    # 연도(열) × 일(행) 피벗
+    pivot = (
+        df_mat.pivot_table(
+            index="일",
+            columns="연도",
+            values="평균기온(℃)",
+            aggfunc="mean",
+        )
+        .sort_index()
+        .sort_index(axis=1)
+    )
+
+    fig_hm = go.Figure(
+        data=go.Heatmap(
+            z=pivot.values,
+            x=pivot.columns,
+            y=pivot.index,
+            colorscale="RdBu_r",
+            colorbar_title="℃",
+            reversescale=False,
+        )
+    )
+    fig_hm.update_layout(
+        title=f"기온 매트릭스 — {month_sel}월 기준 (선택 연도 {mat_start}~{mat_end})",
+        xaxis_title="연도",
+        yaxis_title="일",
+        margin=dict(l=20, r=20, t=40, b=40),
+    )
+
+    st.plotly_chart(fig_hm, use_container_width=True)
 
 
 if __name__ == "__main__":
