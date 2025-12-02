@@ -1,4 +1,4 @@
-# app.py — Daily vs Monthly Polynomial (3차) R² 비교
+# app.py — Daily vs Monthly Polynomial (3차) R² & 월별 비교
 
 import numpy as np
 import pandas as pd
@@ -16,7 +16,7 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
-# 데이터 불러오기 (깃허브 레포의 엑셀 파일)
+# 데이터 불러오기
 # ─────────────────────────────────────────────
 @st.cache_data
 def load_daily_data() -> pd.DataFrame:
@@ -24,16 +24,16 @@ def load_daily_data() -> pd.DataFrame:
 
     df = pd.read_excel(excel_path)
 
-    # 필수 컬럼만 사용
+    # 필요한 컬럼만 사용
     df = df[["일자", "공급량(MJ)", "공급량(M3)", "평균기온(℃)"]].copy()
 
-    # 날짜 형식 변환
+    # 날짜 형식
     df["일자"] = pd.to_datetime(df["일자"])
 
-    # 공급량 또는 기온이 없는 날 제거
+    # 결측 제거
     df = df.dropna(subset=["공급량(MJ)", "평균기온(℃)"])
 
-    # 연도, 월 파생
+    # 연도/월 파생
     df["연도"] = df["일자"].dt.year
     df["월"] = df["일자"].dt.month
 
@@ -41,26 +41,21 @@ def load_daily_data() -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
-# 3차 다항식 회귀 + R² 계산 함수
+# 3차 다항식 회귀 + R²
 # ─────────────────────────────────────────────
 def fit_poly3_and_r2(x: pd.Series, y: pd.Series):
-    """
-    x : 독립변수 (기온)
-    y : 종속변수 (공급량)
-    return: (coef, y_pred, r2)
-    """
     x = np.asarray(x, dtype="float64")
     y = np.asarray(y, dtype="float64")
 
-    # 3차 다항식은 최소 4개 이상의 점 필요
+    # 최소 4개 포인트 필요
     if len(x) < 4:
         return None, None, None
 
-    coef = np.polyfit(x, y, 3)          # 계수 (a3, a2, a1, a0)
-    y_pred = np.polyval(coef, x)        # 예측값
+    coef = np.polyfit(x, y, 3)
+    y_pred = np.polyval(coef, x)
 
-    ss_res = np.sum((y - y_pred) ** 2)  # 잔차 제곱합
-    ss_tot = np.sum((y - np.mean(y)) ** 2)  # 전체 제곱합
+    ss_res = np.sum((y - y_pred) ** 2)
+    ss_tot = np.sum((y - np.mean(y)) ** 2)
 
     if ss_tot == 0:
         r2 = np.nan
@@ -71,13 +66,12 @@ def fit_poly3_and_r2(x: pd.Series, y: pd.Series):
 
 
 # ─────────────────────────────────────────────
-# 플롯 함수 (산점도 + 3차 곡선)
+# 산점도 + 곡선 플롯
 # ─────────────────────────────────────────────
 def plot_poly_fit(x, y, coef, title, x_label, y_label):
     x = np.asarray(x, dtype="float64")
     y = np.asarray(y, dtype="float64")
 
-    # 곡선용 x-grid
     x_grid = np.linspace(x.min(), x.max(), 200)
     y_grid = np.polyval(coef, x_grid)
 
@@ -109,7 +103,7 @@ def plot_poly_fit(x, y, coef, title, x_label, y_label):
 
 
 # ─────────────────────────────────────────────
-# 메인 화면
+# 메인
 # ─────────────────────────────────────────────
 def main():
     st.title("도시가스 공급량 — 일별 vs 월별 기온기반 3차 다항식 예측력 비교")
@@ -121,8 +115,10 @@ def main():
     max_window = min(10, max_year - min_year + 1)
 
     st.sidebar.header("분석 옵션")
+
+    # 학습에 사용할 최근 N년
     year_window = st.sidebar.slider(
-        "최근 N년 사용 (1~10년)",
+        "모델 학습에 사용할 최근 N년 (1~10년)",
         min_value=1,
         max_value=max_window,
         value=min(5, max_window),
@@ -130,12 +126,12 @@ def main():
     )
 
     start_year = max_year - year_window + 1
-    st.sidebar.write(f"사용 구간: **{start_year}년 ~ {max_year}년**")
+    st.sidebar.write(f"모델 학습 구간: **{start_year}년 ~ {max_year}년**")
 
-    # 선택 기간 필터링
+    # 학습용 윈도우 필터
     df_window = df[df["연도"].between(start_year, max_year)].copy()
 
-    # ── 월별 집계 데이터 생성 ──────────────────
+    # ── 월별 집계 데이터 (학습용) ────────────────
     df_month = (
         df_window
         .groupby(["연도", "월"], as_index=False)
@@ -145,41 +141,47 @@ def main():
         )
     )
 
-    # 월별 회귀
+    # 월단위 회귀
     coef_m, y_pred_m, r2_m = fit_poly3_and_r2(
         df_month["평균기온"],
         df_month["공급량_MJ"],
     )
-    df_month["예측공급량_MJ"] = y_pred_m
+    if y_pred_m is not None:
+        df_month["예측공급량_MJ"] = y_pred_m
+    else:
+        df_month["예측공급량_MJ"] = np.nan
 
-    # 일별 회귀
+    # 일단위 회귀
     coef_d, y_pred_d, r2_d = fit_poly3_and_r2(
         df_window["평균기온(℃)"],
         df_window["공급량(MJ)"],
     )
-    df_window["예측공급량_MJ"] = y_pred_d
+    if y_pred_d is not None:
+        df_window["예측공급량_MJ"] = y_pred_d
+    else:
+        df_window["예측공급량_MJ"] = np.nan
 
-    # ── 상단: R² 비교 ────────────────────────
+    # ── 상단: R² 비교 ─────────────────────────
     st.subheader("최근 N년 기준 R² 비교 (3차 다항식)")
 
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("#### 월 단위 모델 (월별 합계 공급량 vs 월평균 기온)")
+        st.markdown("#### 월 단위 모델 (월평균 기온 → 월별 공급량)")
         if r2_m is not None:
-            st.metric("R² (월)", f"{r2_m:.3f}", help="1에 가까울수록 월 단위 예측력이 높음")
+            st.metric("R² (월 단위)", f"{r2_m:.3f}")
             st.caption(f"사용 월 수: {len(df_month)}")
         else:
             st.write("월 단위 회귀에 필요한 데이터가 부족해.")
 
     with col2:
-        st.markdown("#### 일 단위 모델 (일별 공급량 vs 일평균 기온)")
+        st.markdown("#### 일 단위 모델 (일평균 기온 → 일별 공급량)")
         if r2_d is not None:
-            st.metric("R² (일)", f"{r2_d:.3f}", help="1에 가까울수록 일 단위 예측력이 높음")
+            st.metric("R² (일 단위)", f"{r2_d:.3f}")
             st.caption(f"사용 일 수: {len(df_window)}")
         else:
             st.write("일 단위 회귀에 필요한 데이터가 부족해.")
 
-    # ── 중단: 산점도 + 곡선 ───────────────────
+    # ── 중단: 산점도 + 곡선 ─────────────────────
     st.subheader("기온–공급량 관계 (실적 vs 3차 다항식 곡선)")
 
     col3, col4 = st.columns(2)
@@ -207,10 +209,9 @@ def main():
             )
             st.plotly_chart(fig_d, use_container_width=True)
 
-    # ── 하단: 특정 연/월 예측 vs 실적 상세 ─────
+    # ── 하단 1: 선택 연/월 예측 vs 실적 상세 ────
     st.subheader("선택 연·월 기준 예측 vs 실적 상세 비교")
 
-    # 선택 가능한 연/월
     year_list = sorted(df_window["연도"].unique())
     sel_year = st.selectbox("연도 선택", year_list, index=len(year_list) - 1)
 
@@ -219,7 +220,7 @@ def main():
 
     st.markdown(f"**선택 월: {sel_year}년 {sel_month}월**")
 
-    # (1) 월별 비교 한 줄 요약
+    # 월 단위 한 줄 요약
     month_row = df_month[
         (df_month["연도"] == sel_year) & (df_month["월"] == sel_month)
     ]
@@ -244,14 +245,14 @@ def main():
             )
         )
 
-    # (2) 일별 상세 비교
+    # 일 단위 상세
     st.markdown("##### 일 단위 상세 비교 (선택 연·월)")
 
     df_month_days = df_window[
         (df_window["연도"] == sel_year) & (df_window["월"] == sel_month)
     ].copy()
 
-    if not df_month_days.empty:
+    if not df_month_days.empty and "예측공급량_MJ" in df_month_days.columns:
         df_month_days["오차_MJ"] = (
             df_month_days["공급량(MJ)"] - df_month_days["예측공급량_MJ"]
         )
@@ -274,7 +275,126 @@ def main():
             .reset_index(drop=True)
         )
     else:
-        st.write("선택한 연·월에 해당하는 일별 데이터가 없어.")
+        st.write("선택한 연·월에 대한 일별 예측 데이터가 없어.")
+
+    # ── 하단 2: 월별 예측 vs 실적 (월/일 모델 비교) ──
+    st.subheader("월별 예측 vs 실적 — 월단위 Poly-3 vs 일단위 Poly-3(합산)")
+
+    year_options = sorted(df["연도"].unique())
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        temp_year = st.selectbox(
+            "① 평균기온 시나리오 기준 연도 (기온 패턴)",
+            options=year_options,
+            index=len(year_options) - 1,  # 기본: 마지막 연도
+        )
+    with col_b:
+        pred_year = st.selectbox(
+            "② 예측/실적 연도",
+            options=year_options,
+            index=len(year_options) - 1,
+        )
+
+    # 기온 시나리오 연도의 일별/월별 기온
+    df_temp_year = df[df["연도"] == temp_year].copy()
+    if df_temp_year.empty:
+        st.write("선택한 평균기온 기준 연도에 대한 데이터가 없어.")
+        return
+
+    # 월평균 기온 (시나리오)
+    temp_month = (
+        df_temp_year.groupby("월")["평균기온(℃)"].mean().sort_index()
+    )
+
+    # 월단위 모델로 예측한 월별 공급량
+    monthly_pred_from_month_model = None
+    if coef_m is not None:
+        monthly_pred_vals = np.polyval(coef_m, temp_month.values)
+        monthly_pred_from_month_model = pd.Series(
+            monthly_pred_vals,
+            index=temp_month.index,
+            name=f"월단위 Poly-3 예측(MJ) - 기온 {temp_year}년"
+        )
+
+    # 일단위 모델로 예측한 일별 공급량 → 월별 합산
+    monthly_pred_from_daily_model = None
+    if coef_d is not None:
+        df_temp_year = df_temp_year.copy()
+        df_temp_year["예측일공급량_MJ_from_daily"] = np.polyval(
+            coef_d,
+            df_temp_year["평균기온(℃)"].to_numpy()
+        )
+        monthly_pred_from_daily_model = (
+            df_temp_year
+            .groupby("월")["예측일공급량_MJ_from_daily"]
+            .sum()
+            .sort_index()
+        )
+        monthly_pred_from_daily_model.name = (
+            f"일단위 Poly-3 예측합(MJ) - 기온 {temp_year}년"
+        )
+
+    # 예측/실적 연도의 실제 월별 공급량
+    df_actual_year = df[df["연도"] == pred_year].copy()
+    monthly_actual = None
+    if not df_actual_year.empty:
+        monthly_actual = (
+            df_actual_year
+            .groupby("월")["공급량(MJ)"]
+            .sum()
+            .sort_index()
+        )
+        monthly_actual.name = f"{pred_year}년 실적(MJ)"
+
+    # 비교용 데이터프레임 구성
+    month_index = list(range(1, 13))
+    compare_dict = {}
+
+    if monthly_actual is not None:
+        compare_dict[monthly_actual.name] = monthly_actual
+
+    if monthly_pred_from_month_model is not None:
+        compare_dict[monthly_pred_from_month_model.name] = monthly_pred_from_month_model
+
+    if monthly_pred_from_daily_model is not None:
+        compare_dict[monthly_pred_from_daily_model.name] = monthly_pred_from_daily_model
+
+    df_compare = pd.DataFrame(compare_dict, index=month_index)
+
+    # 그래프
+    fig_line = go.Figure()
+    for col in df_compare.columns:
+        fig_line.add_trace(
+            go.Scatter(
+                x=list(df_compare.index),
+                y=df_compare[col],
+                mode="lines+markers",
+                name=col,
+            )
+        )
+
+    fig_line.update_layout(
+        title=(
+            f"{pred_year}년 월별 공급량: 실적 vs 예측 "
+            f"(기온 시나리오 {temp_year}년, Poly-3)"
+        ),
+        xaxis_title="월",
+        yaxis_title="공급량 (MJ)",
+        xaxis=dict(
+            tickmode="array",
+            tickvals=month_index,
+            ticktext=[f"{m}월" for m in month_index],
+        ),
+        margin=dict(l=20, r=20, t=40, b=20),
+    )
+
+    st.plotly_chart(fig_line, use_container_width=True)
+
+    st.markdown("##### 월별 실적/예측 수치표")
+    st.dataframe(
+        df_compare.round(0)
+    )
 
 
 if __name__ == "__main__":
