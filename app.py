@@ -1,7 +1,10 @@
-import numpy as np
-import pandas as pd
+import calendar
+from io import BytesIO
 from pathlib import Path
 
+import holidays
+import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -52,6 +55,19 @@ def load_corr_data() -> pd.DataFrame | None:
     if not excel_path.exists():
         return None
     return pd.read_excel(excel_path)
+
+
+@st.cache_data
+def load_monthly_plan() -> pd.DataFrame:
+    """
+    공급량(계획_실적).xlsx 중 '월별계획_실적' 시트 사용
+    컬럼 : 일자, 연, 월, 계획(사업계획제출_MJ), ...
+    """
+    excel_path = Path(__file__).parent / "공급량(계획_실적).xlsx"
+    df = pd.read_excel(excel_path, sheet_name="월별계획_실적")
+    df["연"] = df["연"].astype(int)
+    df["월"] = df["월"].astype(int)
+    return df
 
 
 # ─────────────────────────────────────────────
@@ -121,7 +137,7 @@ def format_table_generic(df, percent_cols=None, temp_cols=None):
 
     for col in df.columns:
         if col in percent_cols:
-            df[col] = df[col].map(lambda x: f"{x:.2f}")
+            df[col] = df[col].map(lambda x: f"{x:.4f}")
         elif col in temp_cols:
             df[col] = df[col].map(lambda x: f"{x:.2f}")
         elif pd.api.types.is_numeric_dtype(df[col]):
@@ -132,28 +148,312 @@ def format_table_generic(df, percent_cols=None, temp_cols=None):
 def center_style(df: pd.DataFrame):
     """모든 표 숫자 및 헤더를 중앙 정렬하는 Styler."""
     styler = (
-        df.style
-        .set_table_styles(
+        df.style.set_table_styles(
             [
                 dict(selector="th", props=[("text-align", "center")]),
                 dict(selector="td", props=[("text-align", "center")]),
             ]
-        )
-        .set_properties(**{"text-align": "center"})
+        ).set_properties(**{"text-align": "center"})
     )
     return styler
 
 
 # ─────────────────────────────────────────────
-# 메인
+# Daily 공급량 분석용 함수
 # ─────────────────────────────────────────────
-def main():
-    st.title("도시가스 공급량 — 일별 vs 월별 기온기반 3차 다항식 예측력 비교")
+def make_daily_plan_table(
+    df_daily: pd.DataFrame,
+    df_plan: pd.DataFrame,
+    target_year: int = 2026,
+    target_month: int = 1,
+    recent_window: int = 3,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None, list[int]]:
+    """
+    최근 recent_window년(예: 2023~2025) 같은 월의 일별 공급 패턴으로
+    target_year/target_month 일별 비율과 일별 계획 공급량을 계산.
+    반환:
+      df_result : 2026년 해당월 일별 계획 테이블
+      df_mat    : 최근 n년 일별 실적 매트릭스 (Heatmap용)
+      recent_years : 사용된 최근 연도 리스트
+    """
+    # 사용 가능한 연도 범위
+    all_years = sorted(df_daily["연도"].unique())
+    start_year = target_year - recent_window
+    recent_years = [y for y in range(start_year, target_year) if y in all_years]
 
-    # df : 예측/R²용 (공급량+기온 둘 다 있는 구간)
-    # df_temp_all : 기온 전체(1980~) 구간
-    df, df_temp_all = load_daily_data()
+    if len(recent_years) == 0:
+        return None, None, []
 
+    # 최근 n년 + 대상 월 데이터
+    df_recent = df_daily[
+        (df_daily["연도"].isin(recent_years)) & (df_daily["월"] == target_month)
+    ].copy()
+    if df_recent.empty:
+        return None, None, recent_years
+
+    # 마지막 일자 (28/29/30/31)
+    last_day = calendar.monthrange(target_year, target_month)[1]
+    day_range = list(range(1, last_day + 1))
+
+    # 일자별 총공급량 (최근 n년 합계 기준)
+    daily_sum = (
+        df_recent.groupby("일", as_index=False)["공급량(MJ)"].sum().rename(
+            columns={"공급량(MJ)": "최근N년_총공급량(MJ)"}
+        )
+    )
+    daily_sum = daily_sum.set_index("일").reindex(day_range, fill_value=0).reset_index()
+
+    total_month = daily_sum["최근N년_총공급량(MJ)"].sum()
+    if total_month <= 0:
+        return None, None, recent_years
+
+    # 일별 비율
+    daily_sum["일별비율"] = daily_sum["최근N년_총공급량(MJ)"] / total_month
+
+    # 최근 n년 평균 공급량 (설명용)
+    daily_avg = (
+        df_recent.groupby("일", as_index=False)["공급량(MJ)"].mean().rename(
+            columns={"공급량(MJ)": "최근N년_평균공급량(MJ)"}
+        )
+    )
+    daily_sum = daily_sum.merge(daily_avg, on="일", how="left")
+
+    # 2026년 월 계획 총량
+    row_plan = df_plan[(df_plan["연"] == target_year) & (df_plan["월"] == target_month)]
+    if row_plan.empty:
+        plan_total = np.nan
+    else:
+        plan_total = float(row_plan["계획(사업계획제출_MJ)"].iloc[0])
+
+    # 일별 예상 공급량
+    daily_sum["예상공급량(MJ)"] = (daily_sum["일별비율"] * plan_total).round(0)
+
+    # 날짜·요일·주말/공휴일 구분
+    dates = pd.to_datetime(
+        {
+            "year": target_year,
+            "month": target_month,
+            "day": daily_sum["일"],
+        }
+    )
+    daily_sum["일자"] = dates
+    daily_sum["연"] = target_year
+    daily_sum["월"] = target_month
+
+    weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
+    daily_sum["요일"] = dates.dt.weekday.map(lambda i: weekday_names[i])
+
+    daily_sum["is_weekend"] = dates.dt.weekday >= 5
+
+    kr_holidays = holidays.KR(years=[target_year])
+    daily_sum["공휴일여부"] = dates.apply(lambda d: d in kr_holidays)
+
+    def _label(row):
+        if row["공휴일여부"]:
+            return "공휴일"
+        elif row["is_weekend"]:
+            return "주말"
+        else:
+            return "평일"
+
+    daily_sum["구분(평일/주말/공휴일)"] = daily_sum.apply(_label, axis=1)
+
+    # 정렬 및 컬럼 순서
+    daily_sum = daily_sum.sort_values("일").reset_index(drop=True)
+    daily_sum = daily_sum[
+        [
+            "연",
+            "월",
+            "일",
+            "일자",
+            "요일",
+            "구분(평일/주말/공휴일)",
+            "공휴일여부",
+            "최근N년_평균공급량(MJ)",
+            "최근N년_총공급량(MJ)",
+            "일별비율",
+            "예상공급량(MJ)",
+        ]
+    ]
+
+    # 최근 n년 일별 실적 매트릭스 (Heatmap)
+    df_mat = (
+        df_recent.pivot_table(
+            index="일", columns="연도", values="공급량(MJ)", aggfunc="sum"
+        )
+        .reindex(index=day_range)
+        .sort_index(axis=1)
+    )
+
+    return daily_sum, df_mat, recent_years
+
+
+# ─────────────────────────────────────────────
+# 탭1: Daily 공급량 분석
+# ─────────────────────────────────────────────
+def tab_daily_plan(df_daily: pd.DataFrame):
+    st.subheader("📅 Daily 공급량 분석 — 최근 3년 패턴 기반 일별 계획")
+
+    df_plan = load_monthly_plan()
+
+    # 기본값: 2026년 1월
+    years_plan = sorted(df_plan["연"].unique())
+    default_year_idx = years_plan.index(2026) if 2026 in years_plan else len(years_plan) - 1
+
+    col_y, col_m = st.columns(2)
+    with col_y:
+        target_year = st.selectbox("계획 연도 선택", years_plan, index=default_year_idx)
+    with col_m:
+        months_plan = sorted(df_plan[df_plan["연"] == target_year]["월"].unique())
+        default_month_idx = months_plan.index(1) if 1 in months_plan else 0
+        target_month = st.selectbox(
+            "계획 월 선택", months_plan, index=default_month_idx, format_func=lambda m: f"{m}월"
+        )
+
+    st.caption(
+        f"최근 **{target_year-3}년 ~ {target_year-1}년**까지의 "
+        f"{target_month}월 일별 공급 패턴으로 **{target_year}년 {target_month}월** 일별 계획을 계산."
+    )
+
+    df_result, df_mat, recent_years = make_daily_plan_table(
+        df_daily=df_daily,
+        df_plan=df_plan,
+        target_year=target_year,
+        target_month=target_month,
+        recent_window=3,
+    )
+
+    if df_result is None or len(recent_years) == 0:
+        st.warning("해당 연도/월에 대해 최근 3년 기준으로 계산할 수 있는 데이터가 없어.")
+        return
+
+    plan_total = df_result["예상공급량(MJ)"].sum()
+    st.markdown(
+        f"**{target_year}년 {target_month}월 사업계획 제출 공급량 합계:** "
+        f"`{plan_total:,.0f} MJ`"
+    )
+
+    # 1. 일별 테이블
+    st.markdown("#### 1. 일별 비율·예상 공급량 테이블")
+
+    view = df_result.copy()
+    view_for_format = view[
+        [
+            "연",
+            "월",
+            "일",
+            "요일",
+            "구분(평일/주말/공휴일)",
+            "공휴일여부",
+            "최근N년_평균공급량(MJ)",
+            "최근N년_총공급량(MJ)",
+            "일별비율",
+            "예상공급량(MJ)",
+        ]
+    ]
+    view_for_format = format_table_generic(
+        view_for_format,
+        percent_cols=["일별비율"],
+    )
+    st.table(center_style(view_for_format))
+
+    # 2. 그래프 (Bar: 예상공급량, Line: 일별비율)
+    st.markdown("#### 2. 일별 예상 공급량 & 비율 그래프")
+
+    weekday_df = view[view["구분(평일/주말/공휴일)"] == "평일"]
+    weekend_df = view[view["구분(평일/주말/공휴일)"] != "평일"]
+
+    fig = go.Figure()
+    # 평일/주말·공휴일을 색으로 분리
+    fig.add_bar(
+        x=weekday_df["일"],
+        y=weekday_df["예상공급량(MJ)"],
+        name="평일 예상공급량(MJ)",
+    )
+    fig.add_bar(
+        x=weekend_df["일"],
+        y=weekend_df["예상공급량(MJ)"],
+        name="주말·공휴일 예상공급량(MJ)",
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=view["일"],
+            y=view["일별비율"],
+            mode="lines+markers",
+            name="일별비율 (최근3년)",
+            yaxis="y2",
+        )
+    )
+
+    fig.update_layout(
+        title=f"{target_year}년 {target_month}월 일별 공급량 계획 (최근3년 {target_month}월 비율 기반)",
+        xaxis_title="일",
+        yaxis=dict(title="예상 공급량 (MJ)"),
+        yaxis2=dict(
+            title="일별비율",
+            overlaying="y",
+            side="right",
+        ),
+        barmode="group",
+        margin=dict(l=20, r=20, t=60, b=40),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 3. 매트릭스(Heatmap) — 최근 3년 일별 실적
+    st.markdown("#### 3. 최근 3년 일별 실적 매트릭스")
+
+    if df_mat is not None:
+        fig_hm = go.Figure(
+            data=go.Heatmap(
+                z=df_mat.values,
+                x=df_mat.columns.astype(str),
+                y=df_mat.index,
+                colorbar_title="공급량(MJ)",
+                colorscale="RdBu_r",
+            )
+        )
+        fig_hm.update_layout(
+            title=f"최근 {len(recent_years)}년 {target_month}월 일별 실적 공급량(MJ) 매트릭스",
+            xaxis_title="연도",
+            yaxis_title="일",
+            margin=dict(l=40, r=40, t=60, b=40),
+        )
+        st.plotly_chart(fig_hm, use_container_width=False)
+
+    # 4. 요약 (평일/주말/공휴일 비중)
+    st.markdown("#### 4. 평일·주말·공휴일 비중 요약")
+
+    summary = (
+        view.groupby("구분(평일/주말/공휴일)", as_index=False)[["일별비율", "예상공급량(MJ)"]]
+        .sum()
+        .rename(columns={"일별비율": "일별비율합계"})
+    )
+    summary = format_table_generic(summary, percent_cols=["일별비율합계"])
+    st.table(center_style(summary))
+
+    # 5. 엑셀 다운로드
+    st.markdown("#### 5. 일별 계획 엑셀 다운로드")
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        view.to_excel(
+            writer,
+            index=False,
+            sheet_name=f"{target_year}_{target_month:02d}_일별계획",
+        )
+
+    st.download_button(
+        label=f"📥 {target_year}년 {target_month}월 일별공급계획 다운로드 (Excel)",
+        data=buffer.getvalue(),
+        file_name=f"{target_year}_{target_month:02d}_일별공급계획.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+# ─────────────────────────────────────────────
+# 탭2: Daily·Monthly 공급량 비교 (기존 내용)
+# ─────────────────────────────────────────────
+def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
     # 공급량이 있는 구간(예측/R²용) 연도 범위
     min_year_model = int(df["연도"].min())
     max_year_model = int(df["연도"].max())
@@ -270,9 +570,7 @@ def main():
     df_window = df[df["연도"].between(train_start, train_end)].copy()
 
     df_month = (
-        df_window
-        .groupby(["연도", "월"], as_index=False)
-        .agg(
+        df_window.groupby(["연도", "월"], as_index=False).agg(
             공급량_MJ=("공급량(MJ)", "sum"),
             평균기온=("평균기온(℃)", "mean"),
         )
@@ -353,7 +651,7 @@ def main():
     with col_scen:
         scen_start, scen_end = st.slider(
             "기온 시나리오에 사용할 연도 범위",
-            min_value=min_year_temp,     # 기온 전체 구간 기준 (1980 포함)
+            min_value=min_year_temp,  # 기온 전체 구간 기준 (1980 포함)
             max_value=max_year_temp,
             value=(scen_default_start, max_year_temp),
             step=1,
@@ -369,11 +667,7 @@ def main():
         st.write("선택한 기온 시나리오 구간에 데이터가 없어.")
         return
 
-    temp_month = (
-        df_scen.groupby("월")["평균기온(℃)"]
-        .mean()
-        .sort_index()
-    )
+    temp_month = df_scen.groupby("월")["평균기온(℃)"].mean().sort_index()
 
     monthly_pred_from_month_model = None
     if coef_m is not None:
@@ -393,15 +687,13 @@ def main():
         )
 
         monthly_daily_by_year = (
-            df_scen
-            .groupby(["연도", "월"])["예측일공급량_MJ_from_daily"]
+            df_scen.groupby(["연도", "월"])["예측일공급량_MJ_from_daily"]
             .sum()
             .reset_index()
         )
 
         monthly_pred_from_daily_model = (
-            monthly_daily_by_year
-            .groupby("월")["예측일공급량_MJ_from_daily"]
+            monthly_daily_by_year.groupby("월")["예측일공급량_MJ_from_daily"]
             .mean()
             .sort_index()
         )
@@ -425,10 +717,7 @@ def main():
     monthly_actual = None
     if not df_actual_year.empty:
         monthly_actual = (
-            df_actual_year
-            .groupby("월")["공급량(MJ)"]
-            .sum()
-            .sort_index()
+            df_actual_year.groupby("월")["공급량(MJ)"].sum().sort_index()
         )
         monthly_actual.name = f"{pred_year}년 실적(MJ)"
 
@@ -452,7 +741,7 @@ def main():
 
     colors = {}
     if monthly_actual is not None:
-        colors[monthly_actual.name] = "red"           # 실적 = 붉은색
+        colors[monthly_actual.name] = "red"  # 실적 = 붉은색
     if monthly_pred_from_month_model is not None:
         colors[monthly_pred_from_month_model.name] = "#1f77b4"
     if monthly_pred_from_daily_model is not None:
@@ -511,7 +800,9 @@ def main():
                 "연간 공급량(MJ)": [total_actual, total_month_pred, total_daily_pred],
             }
         )
-        summary_df["실적대비 차이(MJ)"] = summary_df["연간 공급량(MJ)"] - total_actual
+        summary_df["실적대비 차이(MJ)"] = (
+            summary_df["연간 공급량(MJ)"] - total_actual
+        )
         summary_df["실적대비 오차율(%)"] = (
             summary_df["실적대비 차이(MJ)"] / total_actual * 100
         )
@@ -527,7 +818,7 @@ def main():
     st.subheader("🌡️ ③ 기온 매트릭스 (일별 평균기온)")
 
     # 기온 전체 구간(평균기온만 있는 데이터) 기준
-    mat_slider_min = min_year_temp   # 1980까지 가능
+    mat_slider_min = min_year_temp  # 1980까지 가능
     mat_slider_max = max_year_temp
     mat_default_start = mat_slider_min
 
@@ -588,6 +879,26 @@ def main():
     )
 
     st.plotly_chart(fig_hm, use_container_width=False)
+
+
+# ─────────────────────────────────────────────
+# 메인
+# ─────────────────────────────────────────────
+def main():
+    st.title("도시가스 공급량 — 일별 vs 월별 기온기반 3차 다항식 예측력 비교")
+
+    df, df_temp_all = load_daily_data()
+
+    mode = st.sidebar.radio(
+        "좌측 탭 선택",
+        ("📅 Daily 공급량 분석", "📊 Daily·Monthly 공급량 비교"),
+        index=0,
+    )
+
+    if mode == "📅 Daily 공급량 분석":
+        tab_daily_plan(df_daily=df)
+    else:
+        tab_daily_monthly_compare(df=df, df_temp_all=df_temp_all)
 
 
 if __name__ == "__main__":
