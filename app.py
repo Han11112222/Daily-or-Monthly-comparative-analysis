@@ -119,33 +119,6 @@ def plot_poly_fit(x, y, coef, title, x_label, y_label):
 # ─────────────────────────────────────────────
 # 표 숫자 포맷팅 (천단위 콤마)
 # ─────────────────────────────────────────────
-def format_table_month_summary(df):
-    df = df.copy()
-    if "월평균 기온(℃)" in df.columns:
-        df["월평균 기온(℃)"] = df["월평균 기온(℃)"].map(lambda x: f"{x:.2f}")
-    for col in ["실제 공급량(MJ)", "예측 공급량(MJ)", "오차(MJ)"]:
-        if col in df.columns:
-            df[col] = df[col].map(lambda x: f"{x:,.0f}")
-    if "오차율(%)" in df.columns:
-        df["오차율(%)"] = df["오차율(%)"].map(lambda x: f"{x:.2f}")
-    return df
-
-
-def format_table_daily(df):
-    df = df.copy()
-    if "일자" in df.columns and np.issubdtype(df["일자"].dtype, np.datetime64):
-        df["일자"] = df["일자"].dt.strftime("%Y-%m-%d")
-    if "평균기온(℃)" in df.columns:
-        df["평균기온(℃)"] = df["평균기온(℃)"].map(lambda x: f"{x:.1f}")
-    for col in ["공급량(MJ)", "예측공급량_MJ", "오차_MJ"]:
-        if col in df.columns:
-            df[col] = df[col].map(lambda x: f"{x:,.0f}")
-    if "오차율_%" in df.columns:
-        df["오차율_%"] = df["오차율_%"].map(lambda x: f"{x:.2f}")
-        df = df.rename(columns={"오차율_%": "오차율(%)"})
-    return df
-
-
 def format_table_generic(df, percent_cols=None, temp_cols=None):
     df = df.copy()
     if percent_cols is None:
@@ -185,7 +158,50 @@ def main():
         num_cols = list(num_df.columns)
 
         if len(num_cols) >= 2:
-            # '공급량'이 들어간 컬럼을 우선적으로 타깃으로 사용
+            corr = num_df.corr()
+
+            # 보기 좋은 diverging 컬러스케일 (파랑–하양–붉은색)
+            nice_colorscale = [
+                [0.0, "#313695"],
+                [0.2, "#4575b4"],
+                [0.4, "#abd9e9"],
+                [0.5, "#ffffbf"],
+                [0.6, "#fdae61"],
+                [0.8, "#d73027"],
+                [1.0, "#a50026"],
+            ]
+
+            # 셀 안에 상관계수 숫자 텍스트 (소수 둘째자리)
+            text = corr.round(2).astype(str).values
+
+            fig_corr = go.Figure(
+                data=go.Heatmap(
+                    z=corr.values,
+                    x=corr.columns,
+                    y=corr.index,
+                    colorscale=nice_colorscale,
+                    zmin=-1,
+                    zmax=1,
+                    zmid=0,
+                    colorbar_title="상관계수",
+                    text=text,
+                    texttemplate="%{text}",
+                    textfont=dict(size=10, color="black"),
+                )
+            )
+            fig_corr.update_layout(
+                xaxis_title="변수",
+                yaxis_title="변수",
+                xaxis=dict(
+                    side="top",
+                    tickangle=45,
+                ),
+                yaxis=dict(autorange="reversed"),
+                margin=dict(l=80, r=20, t=80, b=80),
+            )
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+            # 공급량과의 상관계수 테이블 (옵션)
             target_col = None
             for c in num_cols:
                 if "공급량" in str(c):
@@ -194,27 +210,6 @@ def main():
             if target_col is None:
                 target_col = num_cols[0]
 
-            st.caption("업로드된 raw 데이터의 숫자컬럼 전체에 대한 상관계수 매트릭스야.")
-            corr = num_df.corr()
-
-            fig_corr = go.Figure(
-                data=go.Heatmap(
-                    z=corr.values,
-                    x=corr.columns,
-                    y=corr.index,
-                    colorscale="RdBu",
-                    zmin=-1,
-                    zmax=1,
-                    colorbar_title="상관계수",
-                )
-            )
-            fig_corr.update_layout(
-                xaxis_title="변수",
-                yaxis_title="변수",
-                margin=dict(l=20, r=20, t=40, b=40),
-            )
-            st.plotly_chart(fig_corr, use_container_width=True)
-
             if target_col in corr.columns:
                 st.markdown(f"**기준 변수: `{target_col}` 과(와) 다른 변수들의 상관계수**")
                 target_series = corr[target_col].drop(target_col).sort_values(ascending=False)
@@ -222,7 +217,7 @@ def main():
         else:
             st.caption("숫자 컬럼이 2개 미만이라 상관도 분석을 할 수 없어.")
 
-    # ── ① 데이터 학습기간 bar (연도 범위 슬라이더 / 폭 1/2) ──────
+    # ── ① 데이터 학습기간 선택 ──────────────────────
     st.subheader("📚 ① 데이터 학습기간 선택 (3차 다항식 R² 계산용)")
 
     train_default_start = max(min_year, max_year - 4)
@@ -320,9 +315,7 @@ def main():
             )
             st.plotly_chart(fig_d, use_container_width=True)
 
-    # (연·월 상세 비교 섹션은 삭제된 상태)
-
-    # ── ② 기온 시나리오 bar (연도 범위 슬라이더 / 폭 1/2) ───────────
+    # ── ② 기온 시나리오 연도 범위 선택 ───────────
     st.subheader("🧊 ② 기온 시나리오 연도 범위 선택 (월평균 vs 일평균 예측 비교용)")
 
     scen_default_start = max(min_year, max_year - 4)
@@ -365,7 +358,6 @@ def main():
         )
 
     # 일단위 모델로 예측한 일별 공급량 → 월별 합산
-    # (여러 년도의 월별 합계를 연도별로 구한 뒤, 월별 '연평균'을 사용)
     monthly_pred_from_daily_model = None
     if coef_d is not None:
         df_scen = df_scen.copy()
@@ -436,14 +428,14 @@ def main():
     r2_m_txt = f"{r2_m:.3f}" if r2_m is not None else "N/A"
     r2_d_txt = f"{r2_d:.3f}" if r2_d is not None else "N/A"
 
-    # 색상 지정: 실적은 붉은색, 예측은 파란색 계열
+    # 색상 지정: 실적은 붉은색, 예측은 파란색/주황색
     colors = {}
     if monthly_actual is not None:
         colors[monthly_actual.name] = "red"
     if monthly_pred_from_month_model is not None:
-        colors[monthly_pred_from_month_model.name] = "#1f77b4"  # 파랑
+        colors[monthly_pred_from_month_model.name] = "#1f77b4"
     if monthly_pred_from_daily_model is not None:
-        colors[monthly_pred_from_daily_model.name] = "#ff7f0e"  # 주황
+        colors[monthly_pred_from_daily_model.name] = "#ff7f0e"
 
     fig_line = go.Figure()
     for col in df_compare.columns:
@@ -477,7 +469,6 @@ def main():
     st.plotly_chart(fig_line, use_container_width=True)
 
     st.markdown("##### 월별 실적/예측 수치표")
-
     df_compare_view = df_compare.copy()
     df_compare_view.index = [f"{m}월" for m in df_compare_view.index]
     df_compare_view = format_table_generic(df_compare_view)
@@ -514,7 +505,6 @@ def main():
     # ── ③ 기온 매트릭스 (일별 평균기온) ─────────────────
     st.subheader("🌡️ ③ 기온 매트릭스 (일별 평균기온)")
 
-    # 사용자 요청: 슬라이더는 항상 1980년부터 가능하도록
     mat_slider_min = 1980
     mat_default_start = max(mat_slider_min, min_year)
 
@@ -534,13 +524,11 @@ def main():
             index=9,  # 기본 10월
         )
 
-    # 실제 데이터는 df에 있는 연도만 필터링됨 (1980보다 이후라도 문제 없음)
     df_mat = df[(df["연도"].between(mat_start, mat_end)) & (df["월"] == month_sel)].copy()
     if df_mat.empty:
         st.write("선택한 연도/월 범위에 대한 기온 데이터가 없어.")
         return
 
-    # 연도(열) × 일(행) 피벗
     pivot = (
         df_mat.pivot_table(
             index="일",
