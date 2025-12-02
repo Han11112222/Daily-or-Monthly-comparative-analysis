@@ -41,6 +41,19 @@ def load_daily_data() -> pd.DataFrame:
     return df
 
 
+@st.cache_data
+def load_corr_data() -> pd.DataFrame | None:
+    """
+    상관도 분석용 raw 데이터 (상관도분석.xlsx)를 읽는다.
+    숫자 컬럼만 사용해서 상관계수 매트릭스를 만든다.
+    """
+    excel_path = Path(__file__).parent / "상관도분석.xlsx"
+    if not excel_path.exists():
+        return None
+    df = pd.read_excel(excel_path)
+    return df
+
+
 # ─────────────────────────────────────────────
 # 3차 다항식 회귀 + R²
 # ─────────────────────────────────────────────
@@ -157,12 +170,60 @@ def main():
     st.title("도시가스 공급량 — 일별 vs 월별 기온기반 3차 다항식 예측력 비교")
 
     df = load_daily_data()
-
     min_year = int(df["연도"].min())
     max_year = int(df["연도"].max())
 
+    # ── 0. 상관도 분석 ────────────────────────────────
+    st.subheader("📊 0. 상관도 분석 (공급량 vs 주요 변수)")
+
+    df_corr_raw = load_corr_data()
+    if df_corr_raw is None:
+        st.caption("상관도분석.xlsx 파일을 찾을 수 없어서 상관도 매트릭스를 표시하지 못했어.")
+    else:
+        # 숫자 컬럼만 추출
+        num_df = df_corr_raw.select_dtypes(include=["number"]).copy()
+        num_cols = list(num_df.columns)
+
+        if len(num_cols) >= 2:
+            # '공급량'이 들어간 컬럼을 우선적으로 타깃으로 사용
+            target_col = None
+            for c in num_cols:
+                if "공급량" in str(c):
+                    target_col = c
+                    break
+            if target_col is None:
+                target_col = num_cols[0]
+
+            st.caption("업로드된 raw 데이터의 숫자컬럼 전체에 대한 상관계수 매트릭스야.")
+            corr = num_df.corr()
+
+            fig_corr = go.Figure(
+                data=go.Heatmap(
+                    z=corr.values,
+                    x=corr.columns,
+                    y=corr.index,
+                    colorscale="RdBu",
+                    zmin=-1,
+                    zmax=1,
+                    colorbar_title="상관계수",
+                )
+            )
+            fig_corr.update_layout(
+                xaxis_title="변수",
+                yaxis_title="변수",
+                margin=dict(l=20, r=20, t=40, b=40),
+            )
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+            if target_col in corr.columns:
+                st.markdown(f"**기준 변수: `{target_col}` 과(와) 다른 변수들의 상관계수**")
+                target_series = corr[target_col].drop(target_col).sort_values(ascending=False)
+                st.dataframe(target_series.round(3).to_frame(name="상관계수"))
+        else:
+            st.caption("숫자 컬럼이 2개 미만이라 상관도 분석을 할 수 없어.")
+
     # ── ① 데이터 학습기간 bar (연도 범위 슬라이더 / 폭 1/2) ──────
-    st.subheader("① 데이터 학습기간 선택 (3차 다항식 R² 계산용)")
+    st.subheader("📚 ① 데이터 학습기간 선택 (3차 다항식 R² 계산용)")
 
     train_default_start = max(min_year, max_year - 4)
 
@@ -232,7 +293,7 @@ def main():
             st.write("일 단위 회귀에 필요한 데이터가 부족해.")
 
     # ── 산점도 + 곡선 ───────────────────────────
-    st.subheader("기온–공급량 관계 (실적 vs 3차 다항식 곡선)")
+    st.subheader("📈 기온–공급량 관계 (실적 vs 3차 다항식 곡선)")
 
     col3, col4 = st.columns(2)
     with col3:
@@ -259,10 +320,10 @@ def main():
             )
             st.plotly_chart(fig_d, use_container_width=True)
 
-    # (요청대로: 연·월 상세 비교 섹션은 삭제)
+    # (연·월 상세 비교 섹션은 삭제된 상태)
 
     # ── ② 기온 시나리오 bar (연도 범위 슬라이더 / 폭 1/2) ───────────
-    st.subheader("② 기온 시나리오 연도 범위 선택 (월평균 vs 일평균 예측 비교용)")
+    st.subheader("🧊 ② 기온 시나리오 연도 범위 선택 (월평균 vs 일평균 예측 비교용)")
 
     scen_default_start = max(min_year, max_year - 4)
 
@@ -356,7 +417,7 @@ def main():
         monthly_actual.name = f"{pred_year}년 실적(MJ)"
 
     # ── 월별 예측 vs 실적 라인그래프 ───────────────────
-    st.subheader("월별 예측 vs 실적 — 월단위 Poly-3 vs 일단위 Poly-3(합산)")
+    st.subheader("🔥 월별 예측 vs 실적 — 월단위 Poly-3 vs 일단위 Poly-3(합산)")
 
     month_index = list(range(1, 13))
     compare_dict = {}
@@ -375,6 +436,15 @@ def main():
     r2_m_txt = f"{r2_m:.3f}" if r2_m is not None else "N/A"
     r2_d_txt = f"{r2_d:.3f}" if r2_d is not None else "N/A"
 
+    # 색상 지정: 실적은 붉은색, 예측은 파란색 계열
+    colors = {}
+    if monthly_actual is not None:
+        colors[monthly_actual.name] = "red"
+    if monthly_pred_from_month_model is not None:
+        colors[monthly_pred_from_month_model.name] = "#1f77b4"  # 파랑
+    if monthly_pred_from_daily_model is not None:
+        colors[monthly_pred_from_daily_model.name] = "#ff7f0e"  # 주황
+
     fig_line = go.Figure()
     for col in df_compare.columns:
         fig_line.add_trace(
@@ -383,6 +453,7 @@ def main():
                 y=df_compare[col],
                 mode="lines+markers",
                 name=col,
+                line=dict(color=colors.get(col, None)),
             )
         )
 
@@ -441,15 +512,17 @@ def main():
         st.table(summary_view)
 
     # ── ③ 기온 매트릭스 (일별 평균기온) ─────────────────
-    st.subheader("③ 기온 매트릭스 (일별 평균기온)")
+    st.subheader("🌡️ ③ 기온 매트릭스 (일별 평균기온)")
 
-    mat_default_start = max(min_year, max_year - 20)
+    # 사용자 요청: 슬라이더는 항상 1980년부터 가능하도록
+    mat_slider_min = 1980
+    mat_default_start = max(mat_slider_min, min_year)
 
-    col_mat_slider, col_mat_month = st.columns([1, 1])  # 슬라이더 폭 1/2
+    col_mat_slider, col_mat_month = st.columns([2, 1])  # 슬라이더 2/3, 월 선택 1/3
     with col_mat_slider:
         mat_start, mat_end = st.slider(
             "연도 범위",
-            min_value=min_year,
+            min_value=mat_slider_min,
             max_value=max_year,
             value=(mat_default_start, max_year),
             step=1,
@@ -461,6 +534,7 @@ def main():
             index=9,  # 기본 10월
         )
 
+    # 실제 데이터는 df에 있는 연도만 필터링됨 (1980보다 이후라도 문제 없음)
     df_mat = df[(df["연도"].between(mat_start, mat_end)) & (df["월"] == month_sel)].copy()
     if df_mat.empty:
         st.write("선택한 연도/월 범위에 대한 기온 데이터가 없어.")
