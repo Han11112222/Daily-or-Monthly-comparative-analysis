@@ -282,7 +282,7 @@ def make_daily_plan_table(
         + 1
     )
 
-    # 공휴일여부는 일단 False (향후 공휴일 플래그 있으면 별도 그룹으로 확장 가능)
+    # 공휴일여부는 일단 False
     df_target["공휴일여부"] = False
 
     def _label(row):
@@ -430,7 +430,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     years_plan = sorted(df_plan["연"].unique())
     default_year_idx = years_plan.index(2026) if 2026 in years_plan else len(years_plan) - 1
 
-    col_y, col_m = st.columns(2)
+    col_y, col_m, _ = st.columns([1, 1, 2])
     with col_y:
         target_year = st.selectbox("계획 연도 선택", years_plan, index=default_year_idx)
     with col_m:
@@ -443,21 +443,23 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     # 사용할 수 있는 과거 연도 수에 따라 슬라이더 범위 설정
     all_years = sorted(df_daily["연도"].unique())
     hist_years = [y for y in all_years if y < target_year]
-    if len(hist_years) < 3:
-        st.warning("이 연도·월은 과거 데이터가 3년 미만이라 최근 N년 분석을 할 수 없어.")
+    if len(hist_years) < 1:
+        st.warning("해당 연도는 직전 연도가 없어 최근 N년 분석을 할 수 없어.")
         return
 
-    slider_min = 3
+    slider_min = 1
     slider_max = min(10, len(hist_years))
 
-    recent_window = st.slider(
-        "최근 몇 년 평균으로 비율을 계산할까?",
-        min_value=slider_min,
-        max_value=slider_max,
-        value=3,
-        step=1,
-        help="예: 3년을 선택하면 대상연도 직전 3개 연도(예: 2023~2025년)의 같은 월 데이터를 사용",
-    )
+    col_slider, _ = st.columns([2, 3])
+    with col_slider:
+        recent_window = st.slider(
+            "최근 몇 년 평균으로 비율을 계산할까?",
+            min_value=slider_min,
+            max_value=slider_max,
+            value=min(3, slider_max),
+            step=1,
+            help="예: 3년을 선택하면 대상연도 직전 3개 연도(예: 2023~2025년)의 같은 월 데이터를 사용",
+        )
 
     st.caption(
         f"최근 {recent_window}년 ({target_year-recent_window}년 ~ {target_year-1}년) "
@@ -564,7 +566,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         fig_hm = go.Figure(
             data=go.Heatmap(
                 z=df_mat.values,
-                x=df_mat.columns.astype(str),
+                x=[str(c) for c in df_mat.columns],  # 연도 문자열
                 y=df_mat.index,
                 colorbar_title="공급량(MJ)",
                 colorscale="RdBu_r",
@@ -572,7 +574,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         )
         fig_hm.update_layout(
             title=f"최근 {len(recent_years)}년 {target_month}월 일별 실적 공급량(MJ) 매트릭스",
-            xaxis_title="연도",
+            xaxis=dict(title="연도", type="category"),  # 카테고리 축 → 콤마/소수점 제거
             yaxis_title="일",
             margin=dict(l=40, r=40, t=60, b=40),
         )
@@ -586,6 +588,16 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         .sum()
         .rename(columns={"일별비율": "일별비율합계"})
     )
+
+    # 합계 행 추가
+    total_row = {
+        "구분(평일/주말)": "합계",
+        "일별비율합계": summary["일별비율합계"].sum(),
+        "예상공급량(MJ)": summary["예상공급량(MJ)"].sum(),
+    }
+    summary = pd.concat([summary, pd.DataFrame([total_row])], ignore_index=True)
+
+    summary = summary.rename(columns={"구분(평일/주말)": "구분"})
     summary = format_table_generic(summary, percent_cols=["일별비율합계"])
     st.table(center_style(summary))
 
@@ -1016,25 +1028,25 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
     # 정사각형 도화지
     side_hm = 700
 
-    fig_hm = go.Figure(
+    fig_hm2 = go.Figure(
         data=go.Heatmap(
             z=pivot.values,
-            x=pivot.columns,
+            x=[str(c) for c in pivot.columns],
             y=pivot.index,
             colorscale="RdBu_r",
             colorbar_title="℃",
         )
     )
-    fig_hm.update_layout(
+    fig_hm2.update_layout(
         title=f"기온 매트릭스 — {month_sel}월 기준 (선택 연도 {mat_start}~{mat_end}년)",
-        xaxis_title="연도",
+        xaxis=dict(title="연도", type="category"),
         yaxis_title="일",
         width=side_hm,
         height=side_hm,  # 정사각형
         margin=dict(l=20, r=20, t=40, b=40),
     )
 
-    st.plotly_chart(fig_hm, use_container_width=False)
+    st.plotly_chart(fig_hm2, use_container_width=False)
 
 
 # ─────────────────────────────────────────────
