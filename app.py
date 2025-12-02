@@ -24,16 +24,10 @@ def load_daily_data() -> pd.DataFrame:
 
     df = pd.read_excel(excel_path)
 
-    # 필요한 컬럼만 사용
     df = df[["일자", "공급량(MJ)", "공급량(M3)", "평균기온(℃)"]].copy()
-
-    # 날짜 형식
     df["일자"] = pd.to_datetime(df["일자"])
-
-    # 결측 제거
     df = df.dropna(subset=["공급량(MJ)", "평균기온(℃)"])
 
-    # 연/월/일 파생
     df["연도"] = df["일자"].dt.year
     df["월"] = df["일자"].dt.month
     df["일"] = df["일자"].dt.day
@@ -43,25 +37,19 @@ def load_daily_data() -> pd.DataFrame:
 
 @st.cache_data
 def load_corr_data() -> pd.DataFrame | None:
-    """
-    상관도 분석용 raw 데이터 (상관도분석.xlsx)를 읽는다.
-    숫자 컬럼만 사용해서 상관계수 매트릭스를 만든다.
-    """
     excel_path = Path(__file__).parent / "상관도분석.xlsx"
     if not excel_path.exists():
         return None
-    df = pd.read_excel(excel_path)
-    return df
+    return pd.read_excel(excel_path)
 
 
 # ─────────────────────────────────────────────
-# 3차 다항식 회귀 + R²
+# 유틸 함수들
 # ─────────────────────────────────────────────
 def fit_poly3_and_r2(x: pd.Series, y: pd.Series):
     x = np.asarray(x, dtype="float64")
     y = np.asarray(y, dtype="float64")
 
-    # 최소 4개 포인트 필요
     if len(x) < 4:
         return None, None, None
 
@@ -79,9 +67,6 @@ def fit_poly3_and_r2(x: pd.Series, y: pd.Series):
     return coef, y_pred, r2
 
 
-# ─────────────────────────────────────────────
-# 산점도 + 곡선 플롯
-# ─────────────────────────────────────────────
 def plot_poly_fit(x, y, coef, title, x_label, y_label):
     x = np.asarray(x, dtype="float64")
     y = np.asarray(y, dtype="float64")
@@ -116,9 +101,6 @@ def plot_poly_fit(x, y, coef, title, x_label, y_label):
     return fig
 
 
-# ─────────────────────────────────────────────
-# 표 숫자 포맷팅 (천단위 콤마)
-# ─────────────────────────────────────────────
 def format_table_generic(df, percent_cols=None, temp_cols=None):
     df = df.copy()
     if percent_cols is None:
@@ -136,6 +118,21 @@ def format_table_generic(df, percent_cols=None, temp_cols=None):
     return df
 
 
+def center_style(df: pd.DataFrame):
+    """모든 표 숫자 및 헤더를 중앙 정렬하는 Styler."""
+    styler = (
+        df.style
+        .set_table_styles(
+            [
+                dict(selector="th", props=[("text-align", "center")]),
+                dict(selector="td", props=[("text-align", "center")]),
+            ]
+        )
+        .set_properties(**{"text-align": "center"})
+    )
+    return styler
+
+
 # ─────────────────────────────────────────────
 # 메인
 # ─────────────────────────────────────────────
@@ -151,16 +148,14 @@ def main():
 
     df_corr_raw = load_corr_data()
     if df_corr_raw is None:
-        st.caption("상관도분석.xlsx 파일을 찾을 수 없어서 상관도 매트릭스를 표시하지 못했어.")
+        st.caption("상관도분석.xlsx 파일이 없어서 상관도 매트릭스를 표시하지 못했어.")
     else:
-        # 숫자 컬럼만 추출
         num_df = df_corr_raw.select_dtypes(include=["number"]).copy()
         num_cols = list(num_df.columns)
 
         if len(num_cols) >= 2:
             corr = num_df.corr()
 
-            # 보기 좋은 diverging 컬러스케일 (파랑–하양–붉은색)
             nice_colorscale = [
                 [0.0, "#313695"],
                 [0.2, "#4575b4"],
@@ -171,13 +166,12 @@ def main():
                 [1.0, "#a50026"],
             ]
 
-            # 셀 안에 상관계수 숫자 텍스트 (소수 둘째자리)
             text = corr.round(2).astype(str).values
-
             n_rows, n_cols = corr.shape
-            base = 800
-            width = base
-            height = int(base * (n_rows / n_cols))  # 셀을 정사각형에 가깝게
+
+            # 가로를 넓게, 세로는 조금 낮게 (대략 4:3 정도 느낌)
+            width = 960
+            height = 480
 
             fig_corr = go.Figure(
                 data=go.Heatmap(
@@ -185,8 +179,8 @@ def main():
                     x=corr.columns,
                     y=corr.index,
                     colorscale=nice_colorscale,
-                    zmin=-1,
-                    zmax=1,
+                    zmin=-0.8,   # 극단값 색을 조금 누그러뜨리기
+                    zmax=0.8,
                     zmid=0,
                     colorbar_title="상관계수",
                     text=text,
@@ -206,10 +200,8 @@ def main():
                 height=height,
                 margin=dict(l=80, r=20, t=80, b=80),
             )
-            # 컨테이너 폭에 맞추지 않고 고정 사이즈 사용 → 셀 정사각형 유지
-            st.plotly_chart(fig_corr, use_container_width=False)
 
-            # 공급량과의 상관계수 테이블
+            # 기준 변수(공급량)와의 상관계수 표 만들기
             target_col = None
             for c in num_cols:
                 if "공급량" in str(c):
@@ -219,21 +211,20 @@ def main():
                 target_col = num_cols[0]
 
             if target_col in corr.columns:
-                st.markdown(f"**기준 변수: `{target_col}` 과(와) 다른 변수들의 상관계수**")
-
                 target_series = corr[target_col].drop(target_col)
-
-                # |상관계수|가 큰 순서대로 (양·음 상관 모두 포함)
                 target_series = target_series.reindex(
                     target_series.abs().sort_values(ascending=False).index
                 )
-
                 tbl_df = target_series.round(3).to_frame(name="상관계수")
 
-                # 가로 폭을 줄이기 위해 왼쪽 1/4 컬럼에만 출력
-                col_tbl, _ = st.columns([1, 3])
+                col_hm, col_tbl = st.columns([3, 1])
+                with col_hm:
+                    st.plotly_chart(fig_corr, use_container_width=False)
                 with col_tbl:
-                    st.dataframe(tbl_df, height=400)
+                    st.markdown(
+                        f"**기준 변수: `{target_col}` 과(와) 다른 변수들의 상관계수**"
+                    )
+                    st.table(center_style(tbl_df))
         else:
             st.caption("숫자 컬럼이 2개 미만이라 상관도 분석을 할 수 없어.")
 
@@ -242,7 +233,7 @@ def main():
 
     train_default_start = max(min_year, max_year - 4)
 
-    col_train, _ = st.columns([1, 1])  # 슬라이더를 화면의 왼쪽 1/2만 사용
+    col_train, _ = st.columns([1, 1])
     with col_train:
         train_start, train_end = st.slider(
             "학습에 사용할 연도 범위",
@@ -254,10 +245,8 @@ def main():
 
     st.caption(f"현재 학습 구간: **{train_start}년 ~ {train_end}년**")
 
-    # 학습용 데이터 (train_start ~ train_end)
     df_window = df[df["연도"].between(train_start, train_end)].copy()
 
-    # 월별 집계 (학습용)
     df_month = (
         df_window
         .groupby(["연도", "월"], as_index=False)
@@ -267,7 +256,6 @@ def main():
         )
     )
 
-    # 월단위 모델
     coef_m, y_pred_m, r2_m = fit_poly3_and_r2(
         df_month["평균기온"],
         df_month["공급량_MJ"],
@@ -277,7 +265,6 @@ def main():
     else:
         df_month["예측공급량_MJ"] = np.nan
 
-    # 일단위 모델
     coef_d, y_pred_d, r2_d = fit_poly3_and_r2(
         df_window["평균기온(℃)"],
         df_window["공급량(MJ)"],
@@ -340,7 +327,7 @@ def main():
 
     scen_default_start = max(min_year, max_year - 4)
 
-    col_scen, _ = st.columns([1, 1])  # 슬라이더를 화면의 왼쪽 1/2만 사용
+    col_scen, _ = st.columns([1, 1])
     with col_scen:
         scen_start, scen_end = st.slider(
             "기온 시나리오에 사용할 연도 범위",
@@ -360,14 +347,12 @@ def main():
         st.write("선택한 기온 시나리오 구간에 데이터가 없어.")
         return
 
-    # 월평균 기온 (시나리오: 여러 년도의 월 평균을 다시 평균)
     temp_month = (
         df_scen.groupby("월")["평균기온(℃)"]
         .mean()
         .sort_index()
     )
 
-    # 월단위 모델로 예측한 월별 공급량 (시나리오 기온)
     monthly_pred_from_month_model = None
     if coef_m is not None:
         monthly_pred_vals = np.polyval(coef_m, temp_month.values)
@@ -377,7 +362,6 @@ def main():
             name=f"월단위 Poly-3 예측(MJ) - 기온 {scen_start}~{scen_end}년 평균",
         )
 
-    # 일단위 모델로 예측한 일별 공급량 → 월별 합산
     monthly_pred_from_daily_model = None
     if coef_d is not None:
         df_scen = df_scen.copy()
@@ -386,7 +370,6 @@ def main():
             df_scen["평균기온(℃)"].to_numpy(),
         )
 
-        # 연도×월별 합산
         monthly_daily_by_year = (
             df_scen
             .groupby(["연도", "월"])["예측일공급량_MJ_from_daily"]
@@ -394,7 +377,6 @@ def main():
             .reset_index()
         )
 
-        # 월별 평균 (연도 수로 나눠서 "연간 평균 1년치" 월별 공급량으로 환산)
         monthly_pred_from_daily_model = (
             monthly_daily_by_year
             .groupby("월")["예측일공급량_MJ_from_daily"]
@@ -405,11 +387,11 @@ def main():
             f"일단위 Poly-3 예측합(MJ) - 기온 {scen_start}~{scen_end}년 평균"
         )
 
-    # 예측/실적 연도 선택 (실제 월별 공급량 비교용)
+    # 예측/실적 연도 선택
     st.markdown("##### 예측/실적 연도 선택")
 
     year_options = sorted(df["연도"].unique())
-    col_pred_year, _ = st.columns([1, 3])  # 선택 박스 폭을 줄이기 위해 1/4만 사용
+    col_pred_year, _ = st.columns([1, 3])
     with col_pred_year:
         pred_year = st.selectbox(
             "실제 월별 공급량을 확인할 연도",
@@ -428,7 +410,7 @@ def main():
         )
         monthly_actual.name = f"{pred_year}년 실적(MJ)"
 
-    # ── 월별 예측 vs 실적 라인그래프 ───────────────────
+    # ── 월별 예측 vs 실적 라인그래프 ────────────────
     st.subheader("🔥 월별 예측 vs 실적 — 월단위 Poly-3 vs 일단위 Poly-3(합산)")
 
     month_index = list(range(1, 13))
@@ -436,10 +418,8 @@ def main():
 
     if monthly_actual is not None:
         compare_dict[monthly_actual.name] = monthly_actual
-
     if monthly_pred_from_month_model is not None:
         compare_dict[monthly_pred_from_month_model.name] = monthly_pred_from_month_model
-
     if monthly_pred_from_daily_model is not None:
         compare_dict[monthly_pred_from_daily_model.name] = monthly_pred_from_daily_model
 
@@ -448,7 +428,6 @@ def main():
     r2_m_txt = f"{r2_m:.3f}" if r2_m is not None else "N/A"
     r2_d_txt = f"{r2_d:.3f}" if r2_d is not None else "N/A"
 
-    # 색상 지정: 실적은 붉은색, 예측은 파란색/주황색
     colors = {}
     if monthly_actual is not None:
         colors[monthly_actual.name] = "red"
@@ -492,9 +471,9 @@ def main():
     df_compare_view = df_compare.copy()
     df_compare_view.index = [f"{m}월" for m in df_compare_view.index]
     df_compare_view = format_table_generic(df_compare_view)
-    st.dataframe(df_compare_view)
+    st.table(center_style(df_compare_view))
 
-    # ── 월별 소계 (연간 합계 및 오차율) ──────────────────
+    # ── 연간 소계 ────────────────────────────────
     if (
         (monthly_actual is not None)
         and (monthly_pred_from_month_model is not None)
@@ -520,15 +499,16 @@ def main():
             summary_df,
             percent_cols=["실적대비 오차율(%)"],
         )
-        st.table(summary_view)
+        st.table(center_style(summary_view))
 
-    # ── ③ 기온 매트릭스 (일별 평균기온) ─────────────────
+    # ── ③ 기온 매트릭스 (일별 평균기온) ─────────────
     st.subheader("🌡️ ③ 기온 매트릭스 (일별 평균기온)")
 
-    mat_slider_min = 1980
-    mat_default_start = max(mat_slider_min, min_year)
+    # 실제 데이터가 있는 연도 범위만 선택 가능하도록
+    mat_slider_min = min_year
+    mat_default_start = mat_slider_min
 
-    col_mat_slider, col_mat_month = st.columns([2, 1])  # 슬라이더 2/3, 월 선택 1/3
+    col_mat_slider, col_mat_month = st.columns([2, 1])
     with col_mat_slider:
         mat_start, mat_end = st.slider(
             "연도 범위 (실제 데이터가 있는 연도만 표시됨)",
@@ -541,10 +521,9 @@ def main():
         month_sel = st.selectbox(
             "월 선택",
             list(range(1, 12 + 1)),
-            index=9,  # 기본 10월
+            index=9,
         )
 
-    # 선택된 범위에 해당하는 데이터만 사용
     df_mat = df[(df["연도"].between(mat_start, mat_end)) & (df["월"] == month_sel)].copy()
     if df_mat.empty:
         st.write("선택한 연도/월 범위에 대한 기온 데이터가 없어.")
@@ -561,12 +540,9 @@ def main():
         .sort_index(axis=1)
     )
 
-    # 셀을 정사각형에 가깝게 만들기 위해 행/열 비율로 높이 조정
-    rows = len(pivot.index)
-    cols = len(pivot.columns)
-    base_w = 900
-    width_hm = base_w
-    height_hm = int(base_w * (rows / cols))
+    # 가로를 넓게, 세로는 상대적으로 낮게 (다른 앱 스샷 비율에 맞춤)
+    width_hm = 1200  # 기존보다 약 20% 확대
+    height_hm = 360  # 세로는 낮게
 
     fig_hm = go.Figure(
         data=go.Heatmap(
@@ -575,7 +551,6 @@ def main():
             y=pivot.index,
             colorscale="RdBu_r",
             colorbar_title="℃",
-            reversescale=False,
         )
     )
     fig_hm.update_layout(
