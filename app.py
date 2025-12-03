@@ -69,6 +69,23 @@ def load_monthly_plan() -> pd.DataFrame:
     return df
 
 
+@st.cache_data
+def load_effective_calendar() -> pd.DataFrame | None:
+    """
+    effective_days_calendar.xlsx 의 'data' 시트 사용
+    컬럼 예시:
+      날짜(yyyymmdd), 연, 월, 일, 요일, 구분, 주중여부, 주말여부, 공휴일여부, 명절여부, 공급량(MJ)
+    """
+    excel_path = Path(__file__).parent / "effective_days_calendar.xlsx"
+    if not excel_path.exists():
+        return None
+
+    df = pd.read_excel(excel_path, sheet_name="data")
+    df["날짜"] = df["날짜"].astype(str).str.zfill(8)
+    df["일자"] = pd.to_datetime(df["날짜"], format="%Y%m%d")
+    return df
+
+
 # ─────────────────────────────────────────────
 # 유틸 함수들
 # ─────────────────────────────────────────────
@@ -143,9 +160,14 @@ def format_table_generic(df, percent_cols=None, temp_cols=None):
             return str(x)
 
     for col in df.columns:
-        # bool 컬럼 (예: 공휴일여부)
+        # bool 컬럼 (공휴일여부, 명절여부 등)
         if df[col].dtype == bool:
-            df[col] = df[col].map(lambda x: "공휴일" if x else "")
+            if col == "공휴일여부":
+                df[col] = df[col].map(lambda x: "공휴일" if x else "")
+            elif col == "명절여부":
+                df[col] = df[col].map(lambda x: "명절" if x else "")
+            else:
+                df[col] = df[col].map(lambda x: "✓" if x else "")
             continue
 
         if col in percent_cols:
@@ -185,11 +207,12 @@ def center_style(df: pd.DataFrame):
 
 
 # ─────────────────────────────────────────────
-# Daily 공급량 분석용 함수
+# Daily 공급량 분석용 함수 (설날/추석/공휴일 반영)
 # ─────────────────────────────────────────────
 def make_daily_plan_table(
     df_daily: pd.DataFrame,
     df_plan: pd.DataFrame,
+    df_cal: pd.DataFrame | None,
     target_year: int = 2026,
     target_month: int = 1,
     recent_window: int = 3,
@@ -198,13 +221,11 @@ def make_daily_plan_table(
     최근 recent_window년 같은 월의 일별 공급 패턴으로
     target_year/target_month 일별 비율과 일별 계획 공급량을 계산.
 
-    논리:
-      1) 최근 N년의 각 연도에서 '해당월 일별 공급량 / 그 연도 해당월 총공급량' → ratio
-      2) 주말(토·일)은 (요일, n번째요일) 기준으로 ratio 평균을 구해서
-         1차로 주말 비율을 확정
-      3) 남은 비율(1 - 주말비율합)을 평일 일자(1~31일) 비율로 나눠서 재분배
-      4) 최종 일별비율 합은 1이 되며, 월 계획 총량에 곱해서 일별 계획 공급량 산출
+    - effective_days_calendar 의
+      주말여부·공휴일여부·명절여부 를 모두 "비주중(쉬는날)"로 묶어서
+      먼저 비율을 확정한 뒤, 남는 비율을 평일에 재분배.
     """
+
     # 사용 가능한 연도 범위
     all_years = sorted(df_daily["연도"].unique())
     start_year = target_year - recent_window
@@ -222,15 +243,39 @@ def make_daily_plan_table(
 
     df_recent = df_recent.sort_values(["연도", "일"]).copy()
     df_recent["weekday_idx"] = df_recent["일자"].dt.weekday  # 0=월, 6=일
-    df_recent["is_weekend"] = df_recent["weekday_idx"] >= 5
 
-    # 연도별 월 합계
+    # ── 달력정보(주말/공휴일/명절) 결합 ────────────────────────
+    if df_cal is not None:
+        cal_cols = ["일자", "요일", "주중여부", "주말여부", "공휴일여부", "명절여부"]
+        cal_use = df_cal[cal_cols].copy()
+        df_recent = df_recent.merge(cal_use, on="일자", how="left")
+
+        for col in ["주중여부", "주말여부", "공휴일여부", "명절여부"]:
+            if col in df_recent.columns:
+                df_recent[col] = df_recent[col].fillna(False)
+
+        # 요일이 비어 있으면 보정
+        if "요일" not in df_recent.columns or df_recent["요일"].isna().all():
+            weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
+            df_recent["요일"] = df_recent["weekday_idx"].map(lambda i: weekday_names[i])
+
+        # 주말 + 공휴일 + 명절 = 쉬는날
+        df_recent["is_weekend"] = (
+            df_recent.get("주말여부", False)
+            | df_recent.get("공휴일여부", False)
+            | df_recent.get("명절여부", False)
+        )
+    else:
+        # 달력이 없으면 토·일만 주말로 처리
+        df_recent["is_weekend"] = df_recent["weekday_idx"] >= 5
+
+    # 연도별 월 합계 / 비율
     df_recent["month_total"] = (
         df_recent.groupby("연도")["공급량(MJ)"].transform("sum")
     )
     df_recent["ratio"] = df_recent["공급량(MJ)"] / df_recent["month_total"]
 
-    # 같은 연도·요일(월~일) 내에서 몇 번째 요일인지 (1번째 토요일, 2번째 토요일 ...)
+    # 같은 연도·요일(월~일) 내에서 몇 번째 요일인지 (1번째 토요일, 2번째 토요일 ... 등)
     df_recent["nth_dow"] = (
         df_recent.sort_values(["연도", "일"])
         .groupby(["연도", "weekday_idx"])
@@ -238,8 +283,9 @@ def make_daily_plan_table(
         + 1
     )
 
-    weekday_mask = df_recent["weekday_idx"] <= 4
-    weekend_mask = ~weekday_mask
+    # 평일/쉬는날 마스크
+    weekday_mask = ~df_recent["is_weekend"]
+    weekend_mask = df_recent["is_weekend"]
 
     # ── 평일: 일자 기준 평균 비율 / 요일 기준 백업 비율 ──
     ratio_by_day = (
@@ -253,7 +299,7 @@ def make_daily_plan_table(
         else pd.Series(dtype=float)
     )
 
-    # ── 주말: (요일, nth_dow) 기준 평균 비율 / 요일 기준 백업 비율 ──
+    # ── 쉬는날(주말+공휴일+명절): (요일, nth_dow) 기준 평균 비율 / 요일 기준 백업 ──
     ratio_weekend_group = (
         df_recent[weekend_mask]
         .groupby(["weekday_idx", "nth_dow"])["ratio"]
@@ -273,7 +319,7 @@ def make_daily_plan_table(
     ratio_weekend_group_dict = ratio_weekend_group.to_dict()
     ratio_weekend_by_dow_dict = ratio_weekend_by_dow.to_dict()
 
-    # 대상 연·월 날짜 생성
+    # ── 대상 연·월 날짜 생성 ─────────────────────────────
     last_day = calendar.monthrange(target_year, target_month)[1]
     date_range = pd.date_range(
         f"{target_year}-{target_month:02d}-01", periods=last_day, freq="D"
@@ -284,12 +330,35 @@ def make_daily_plan_table(
     df_target["월"] = target_month
     df_target["일"] = df_target["일자"].dt.day
     df_target["weekday_idx"] = df_target["일자"].dt.weekday
-    df_target["is_weekend"] = df_target["weekday_idx"] >= 5
 
-    weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
-    df_target["요일"] = df_target["weekday_idx"].map(lambda i: weekday_names[i])
+    # 달력정보 결합 (미래연도 포함)
+    if df_cal is not None:
+        cal_cols = ["일자", "요일", "주중여부", "주말여부", "공휴일여부", "명절여부"]
+        cal_use = df_cal[cal_cols].copy()
+        df_target = df_target.merge(cal_use, on="일자", how="left")
 
-    # 대상 월에서도 요일별로 몇 번째인지 계산 (토요일1, 토요일2 ...)
+        for col in ["주중여부", "주말여부", "공휴일여부", "명절여부"]:
+            if col in df_target.columns:
+                df_target[col] = df_target[col].fillna(False)
+
+        if "요일" not in df_target.columns or df_target["요일"].isna().any():
+            weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
+            df_target["요일"] = df_target["weekday_idx"].map(lambda i: weekday_names[i])
+    else:
+        weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
+        df_target["요일"] = df_target["weekday_idx"].map(lambda i: weekday_names[i])
+        df_target["주말여부"] = df_target["weekday_idx"] >= 5
+        df_target["공휴일여부"] = False
+        df_target["명절여부"] = False
+
+    # 쉬는날 플래그
+    df_target["is_weekend"] = (
+        df_target.get("주말여부", False)
+        | df_target.get("공휴일여부", False)
+        | df_target.get("명절여부", False)
+    )
+
+    # 대상 월에서도 요일별로 몇 번째인지 계산 (토요일1, 토요일2 ... 등)
     df_target["nth_dow"] = (
         df_target.sort_values("일")
         .groupby("weekday_idx")
@@ -297,15 +366,23 @@ def make_daily_plan_table(
         + 1
     )
 
-    # 공휴일여부는 일단 False
-    df_target["공휴일여부"] = False
-
-    def _label(row):
+    # 구분 컬럼 (요약 / 상세)
+    def _label_simple(row):
         return "주말" if row["is_weekend"] else "평일"
 
-    df_target["구분(평일/주말)"] = df_target.apply(_label, axis=1)
+    def _label_detail(row):
+        if row.get("명절여부", False):
+            return "명절"
+        if row.get("공휴일여부", False):
+            return "공휴일"
+        if row.get("주말여부", False):
+            return "주말"
+        return "평일"
 
-    # ── 1단계: 주말 비율 확정 ─────────────────────────
+    df_target["구분(평일/주말)"] = df_target.apply(_label_simple, axis=1)
+    df_target["구분(평일/주말/공휴일/명절)"] = df_target.apply(_label_detail, axis=1)
+
+    # ── 1단계: 쉬는날 비율 확정 ─────────────────────────
     def _weekend_ratio(row):
         dow = row["weekday_idx"]
         nth = row["nth_dow"]
@@ -316,6 +393,7 @@ def make_daily_plan_table(
             val = ratio_weekend_by_dow_dict.get(dow, None)
         return val
 
+    # ── 2단계: 평일 비율 (일자 기준 → 요일 기준 백업) ─────────────
     def _weekday_ratio(row):
         day = row["일"]
         dow = row["weekday_idx"]
@@ -328,7 +406,7 @@ def make_daily_plan_table(
     df_target["weekend_raw"] = 0.0
     df_target["weekday_raw"] = 0.0
 
-    # 주말/평일별 raw ratio 채우기
+    # 쉬는날/평일별 raw ratio 채우기
     for idx, row in df_target.iterrows():
         if row["is_weekend"]:
             val = _weekend_ratio(row)
@@ -337,7 +415,7 @@ def make_daily_plan_table(
             val = _weekday_ratio(row)
             df_target.at[idx, "weekday_raw"] = val if val is not None else np.nan
 
-    # NaN 처리: 주말/평일 각각에서 평균으로 채우고, 그래도 없으면 0
+    # NaN 처리: 그룹 평균으로 채우고, 그래도 없으면 0
     if df_target["weekend_raw"].notna().any():
         mean_wend = df_target["weekend_raw"].dropna().mean()
         df_target["weekend_raw"] = df_target["weekend_raw"].fillna(mean_wend)
@@ -353,7 +431,7 @@ def make_daily_plan_table(
     weekend_raw_sum = df_target["weekend_raw"].sum()
     weekday_raw_sum = df_target["weekday_raw"].sum()
 
-    # 전체 비율 합(주말+평일)이 0이면 균등 분배
+    # 전체 비율 합이 0이면 균등 분배
     if weekend_raw_sum + weekday_raw_sum <= 0:
         df_target["일별비율"] = 1.0 / last_day
     else:
@@ -364,7 +442,7 @@ def make_daily_plan_table(
         df_target["weekend_scaled"] = df_target["weekend_raw"] * scale_all
         weekend_total_share = df_target["weekend_scaled"].sum()
 
-        # 남은 비율(평일+공휴일 몫)
+        # 남은 비율(평일 몫)
         rest_share = max(1.0 - weekend_total_share, 0.0)
 
         # 2단계: 남은 비율을 평일 raw 비율 비중대로 재분배
@@ -413,7 +491,9 @@ def make_daily_plan_table(
             "일자",
             "요일",
             "구분(평일/주말)",
+            "구분(평일/주말/공휴일/명절)",
             "공휴일여부",
+            "명절여부",
             "최근N년_평균공급량(MJ)",
             "최근N년_총공급량(MJ)",
             "일별비율",
@@ -434,10 +514,10 @@ def make_daily_plan_table(
 
 
 # ─────────────────────────────────────────────
-# 탭1: Daily 공급량 분석
+# 탭1: Daily 공급량 분석 (달력 반영 버전)
 # ─────────────────────────────────────────────
-def tab_daily_plan(df_daily: pd.DataFrame):
-    st.subheader("📅 Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획")
+def tab_daily_plan(df_daily: pd.DataFrame, df_cal: pd.DataFrame | None):
+    st.subheader("📅 Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획 (주말·공휴일·명절 반영)")
 
     df_plan = load_monthly_plan()
 
@@ -484,6 +564,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     df_result, df_mat, recent_years = make_daily_plan_table(
         df_daily=df_daily,
         df_plan=df_plan,
+        df_cal=df_cal,
         target_year=target_year,
         target_month=target_month,
         recent_window=recent_window,
@@ -517,7 +598,9 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         "일자": "",
         "요일": "합계",
         "구분(평일/주말)": "",
+        "구분(평일/주말/공휴일/명절)": "",
         "공휴일여부": False,
+        "명절여부": False,
         "최근N년_평균공급량(MJ)": view["최근N년_평균공급량(MJ)"].sum(),
         "최근N년_총공급량(MJ)": view["최근N년_총공급량(MJ)"].sum(),
         "일별비율": view["일별비율"].sum(),
@@ -534,7 +617,9 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             "일",
             "요일",
             "구분(평일/주말)",
+            "구분(평일/주말/공휴일/명절)",
             "공휴일여부",
+            "명절여부",
             "최근N년_평균공급량(MJ)",
             "최근N년_총공급량(MJ)",
             "일별비율",
@@ -562,7 +647,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     fig.add_bar(
         x=weekend_df["일"],
         y=weekend_df["예상공급량(MJ)"],
-        name="주말 예상공급량(MJ)",
+        name="주말·공휴일·명절 예상공급량(MJ)",
     )
     fig.add_trace(
         go.Scatter(
@@ -577,7 +662,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     fig.update_layout(
         title=(
             f"{target_year}년 {target_month}월 일별 공급량 계획 "
-            f"(최근{recent_window}년 {target_month}월 비율 기반)"
+            f"(최근{recent_window}년 {target_month}월 비율 기반, 주말·공휴일·명절 반영)"
         ),
         xaxis_title="일",
         yaxis=dict(title="예상 공급량 (MJ)"),
@@ -598,7 +683,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         fig_hm = go.Figure(
             data=go.Heatmap(
                 z=df_mat.values,
-                x=[str(c) for c in df_mat.columns],  # 연도 문자열
+                x=[str(c) for c in df_mat.columns],  # 연도 문자열 (콤마 없이)
                 y=df_mat.index,
                 colorbar_title="공급량(MJ)",
                 colorscale="RdBu_r",
@@ -651,19 +736,15 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
 
 # ─────────────────────────────────────────────
-# 탭2: Daily·Monthly 공급량 비교 (기존 내용)
+# 탭2: Daily·Monthly 공급량 비교 (기존 코드 그대로 넣기)
 # ─────────────────────────────────────────────
 def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
-    # (이 아래 부분은 이전과 동일 — R² 비교, 예측 vs 실적, 기온 매트릭스)
-    # ... 기존 코드 그대로 ...
-    # === 여기부터는 이전에 준 tab_daily_monthly_compare 전체 내용 그대로 복사 ===
-    # 공간 관계상 생략하면 안 되니, 꼭 이전 답변의 tab_daily_monthly_compare 정의 전체를
-    # 이 위치에 그대로 넣어줘.
-    # -------------------------------------------------------------------------
-    # 편의를 위해, 바로 위 답변에서 준 tab_daily_monthly_compare 전체 블록을
-    # 그대로 사용하면 돼.
-    # -------------------------------------------------------------------------
-    pass  # <-- 실제로는 pass 지우고 기존 전체 함수를 붙여 넣기
+    """
+    여기에는 'Daily·Monthly 공급량 비교'에서 쓰던 기존 코드를 그대로 붙이면 돼.
+    (R² 비교, 3차 다항식 피팅, 기온 매트릭스 등 이전에 만들었던 전체 블록.)
+    지금은 탭 구조만 유지하려고 최소한의 자리만 남겨둔 상태.
+    """
+    st.subheader("📊 Daily·Monthly 공급량 비교 탭 (기존 코드 붙여넣기 필요)")
 
 
 # ─────────────────────────────────────────────
@@ -673,6 +754,7 @@ def main():
     st.title("도시가스 공급량 — 일별 vs 월별 기온기반 3차 다항식 예측력 비교")
 
     df, df_temp_all = load_daily_data()
+    df_cal = load_effective_calendar()
 
     mode = st.sidebar.radio(
         "좌측 탭 선택",
@@ -681,7 +763,7 @@ def main():
     )
 
     if mode == "📅 Daily 공급량 분석":
-        tab_daily_plan(df_daily=df)
+        tab_daily_plan(df_daily=df, df_cal=df_cal)
     else:
         tab_daily_monthly_compare(df=df, df_temp_all=df_temp_all)
 
