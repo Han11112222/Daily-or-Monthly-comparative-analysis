@@ -644,22 +644,29 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     st.markdown("#### 3. 최근 N년 일별 실적 매트릭스")
 
     if df_mat is not None:
-        fig_hm = go.Figure(
-            data=go.Heatmap(
-                z=df_mat.values,
-                x=[str(c) for c in df_mat.columns],
-                y=df_mat.index,
-                colorbar_title="공급량(MJ)",
-                colorscale="RdBu_r",
-            )
+    fig_hm = go.Figure(
+        data=go.Heatmap(
+            z=pivot.values,
+            x=pivot.columns,
+            y=pivot.index,
+            colorscale="RdBu_r",
+            colorbar_title="℃",
         )
-        fig_hm.update_layout(
-            title=f"최근 {len(recent_years)}년 {target_month}월 일별 실적 공급량(MJ) 매트릭스",
-            xaxis=dict(title="연도", type="category"),
-            yaxis_title="일",
-            margin=dict(l=40, r=40, t=60, b=40),
-        )
-        st.plotly_chart(fig_hm, use_container_width=False)
+    )
+    fig_hm.update_layout(
+        title=f"기온 매트릭스 — {month_sel}월 기준 (선택 연도 {mat_start}~{mat_end})",
+        xaxis_title="연도",
+        # ⬇⬇ 여기만 수정
+        yaxis=dict(
+            title="일",
+            autorange="reversed",   # 1일이 위, 30/31일이 아래
+        ),
+        width=side_hm,
+        height=side_hm,
+        margin=dict(l=20, r=20, t=40, b=40),
+    )
+
+    st.plotly_chart(fig_hm, use_container_width=False)
 
     # 4. 평일·주말 비중 요약
     st.markdown("#### 4. 평일·주말 비중 요약")
