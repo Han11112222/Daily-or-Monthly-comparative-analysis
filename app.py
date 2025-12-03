@@ -69,6 +69,36 @@ def load_monthly_plan() -> pd.DataFrame:
     return df
 
 
+@st.cache_data
+def load_effective_calendar() -> pd.DataFrame | None:
+    """
+    effective_days_calendar.xlsx 읽어서
+    - 날짜 → 일자(datetime)
+    - 공휴일여부, 명절여부(bool) 만 사용
+    """
+    excel_path = Path(__file__).parent / "effective_days_calendar.xlsx"
+    if not excel_path.exists():
+        return None
+
+    df = pd.read_excel(excel_path)
+
+    if "날짜" not in df.columns:
+        return None
+
+    # 날짜를 datetime으로 변환
+    df["일자"] = pd.to_datetime(df["날짜"].astype(str), format="%Y%m%d", errors="coerce")
+
+    # 공휴일/명절 컬럼 없으면 False 로 채움
+    for col in ["공휴일여부", "명절여부"]:
+        if col not in df.columns:
+            df[col] = False
+
+    df["공휴일여부"] = df["공휴일여부"].fillna(False).astype(bool)
+    df["명절여부"] = df["명절여부"].fillna(False).astype(bool)
+
+    return df[["일자", "공휴일여부", "명절여부"]].copy()
+
+
 # ─────────────────────────────────────────────
 # 유틸 함수들
 # ─────────────────────────────────────────────
@@ -173,7 +203,6 @@ def center_style(df: pd.DataFrame):
         )
         .set_properties(**{"text-align": "center"})
     )
-    # 인덱스 숨기기 (pandas 버전별 대응)
     try:
         styler = styler.hide(axis="index")
     except Exception:
@@ -197,7 +226,11 @@ def make_daily_plan_table(
     """
     최근 recent_window년 같은 월의 일별 공급 패턴으로
     target_year/target_month 일별 비율과 일별 계획 공급량을 계산.
+
+    토·일 + 공휴일 + 명절(설날/추석 등)을 모두 '주말' 패턴으로 묶어서 사용.
     """
+    cal_df = load_effective_calendar()
+
     # 사용 가능한 연도 범위
     all_years = sorted(df_daily["연도"].unique())
     start_year = target_year - recent_window
@@ -215,7 +248,23 @@ def make_daily_plan_table(
 
     df_recent = df_recent.sort_values(["연도", "일"]).copy()
     df_recent["weekday_idx"] = df_recent["일자"].dt.weekday  # 0=월, 6=일
-    df_recent["is_weekend"] = df_recent["weekday_idx"] >= 5
+
+    # ── 캘린더 정보를 머지해서 공휴일/명절 붙이기 ──
+    if cal_df is not None:
+        df_recent = df_recent.merge(
+            cal_df,
+            on="일자",
+            how="left",
+        )
+        df_recent["공휴일여부"] = df_recent["공휴일여부"].fillna(False).astype(bool)
+        df_recent["명절여부"] = df_recent["명절여부"].fillna(False).astype(bool)
+    else:
+        df_recent["공휴일여부"] = False
+        df_recent["명절여부"] = False
+
+    df_recent["is_holiday"] = df_recent["공휴일여부"] | df_recent["명절여부"]
+    # 주말 정의: 토/일 OR 공휴일/명절
+    df_recent["is_weekend"] = (df_recent["weekday_idx"] >= 5) | df_recent["is_holiday"]
 
     # 연도별 월 합계
     df_recent["month_total"] = (
@@ -231,8 +280,8 @@ def make_daily_plan_table(
         + 1
     )
 
-    weekday_mask = df_recent["weekday_idx"] <= 4
-    weekend_mask = ~weekday_mask
+    weekday_mask = ~df_recent["is_weekend"]
+    weekend_mask = df_recent["is_weekend"]
 
     # 평일: 일자 기준 평균 비율 / 요일 기준 백업 비율
     ratio_by_day = (
@@ -246,7 +295,7 @@ def make_daily_plan_table(
         else pd.Series(dtype=float)
     )
 
-    # 주말: (요일, nth_dow) 기준 평균 비율 / 요일 기준 백업 비율
+    # 주말(토·일 + 공휴일/명절): (요일, nth_dow) 기준 평균 비율 / 요일 기준 백업 비율
     ratio_weekend_group = (
         df_recent[weekend_mask]
         .groupby(["weekday_idx", "nth_dow"])["ratio"]
@@ -277,7 +326,22 @@ def make_daily_plan_table(
     df_target["월"] = target_month
     df_target["일"] = df_target["일자"].dt.day
     df_target["weekday_idx"] = df_target["일자"].dt.weekday
-    df_target["is_weekend"] = df_target["weekday_idx"] >= 5
+
+    # 캘린더 붙이기 (대상월)
+    if cal_df is not None:
+        df_target = df_target.merge(
+            cal_df,
+            on="일자",
+            how="left",
+        )
+        df_target["공휴일여부"] = df_target["공휴일여부"].fillna(False).astype(bool)
+        df_target["명절여부"] = df_target["명절여부"].fillna(False).astype(bool)
+    else:
+        df_target["공휴일여부"] = False
+        df_target["명절여부"] = False
+
+    df_target["is_holiday"] = df_target["공휴일여부"] | df_target["명절여부"]
+    df_target["is_weekend"] = (df_target["weekday_idx"] >= 5) | df_target["is_holiday"]
 
     weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
     df_target["요일"] = df_target["weekday_idx"].map(lambda i: weekday_names[i])
@@ -289,9 +353,6 @@ def make_daily_plan_table(
         .cumcount()
         + 1
     )
-
-    # 공휴일여부(향후 캘린더 붙여서 활용)
-    df_target["공휴일여부"] = False
 
     def _label(row):
         return "주말" if row["is_weekend"] else "평일"
@@ -550,7 +611,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     fig.add_bar(
         x=weekend_df["일"],
         y=weekend_df["예상공급량(MJ)"],
-        name="주말 예상공급량(MJ)",
+        name="주말/공휴일 예상공급량(MJ)",
     )
     fig.add_trace(
         go.Scatter(
