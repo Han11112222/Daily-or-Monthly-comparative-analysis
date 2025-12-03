@@ -656,7 +656,8 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         fig_hm.update_layout(
             title=f"최근 {len(recent_years)}년 {target_month}월 일별 실적 공급량(MJ) 매트릭스",
             xaxis=dict(title="연도", type="category"),
-            yaxis_title="일",
+            # ⬇⬇ 일자 1일이 위에 오도록 y축 반전
+            yaxis=dict(title="일", autorange="reversed"),
             margin=dict(l=40, r=40, t=60, b=40),
         )
         st.plotly_chart(fig_hm, use_container_width=False)
@@ -1131,7 +1132,8 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
     fig_hm.update_layout(
         title=f"기온 매트릭스 — {month_sel}월 기준 (선택 연도 {mat_start}~{mat_end})",
         xaxis_title="연도",
-        yaxis_title="일",
+        # ⬇⬇ 일자 1일이 위에 오도록 y축 반전
+        yaxis=dict(title="일", autorange="reversed"),
         width=side_hm,
         height=side_hm,
         margin=dict(l=20, r=20, t=40, b=40),
