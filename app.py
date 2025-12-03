@@ -197,13 +197,6 @@ def make_daily_plan_table(
     """
     최근 recent_window년 같은 월의 일별 공급 패턴으로
     target_year/target_month 일별 비율과 일별 계획 공급량을 계산.
-
-    논리:
-      1) 최근 N년의 각 연도에서 '해당월 일별 공급량 / 그 연도 해당월 총공급량' → ratio
-      2) 주말(토·일)은 (요일, n번째요일) 기준으로 ratio 평균을 구해서
-         1차로 주말 비율을 확정
-      3) 남은 비율(1 - 주말비율합)을 평일 일자(1~31일) 비율로 나눠서 재분배
-      4) 최종 일별비율 합은 1이 되며, 월 계획 총량에 곱해서 일별 계획 공급량 산출
     """
     # 사용 가능한 연도 범위
     all_years = sorted(df_daily["연도"].unique())
@@ -241,7 +234,7 @@ def make_daily_plan_table(
     weekday_mask = df_recent["weekday_idx"] <= 4
     weekend_mask = ~weekday_mask
 
-    # ── 평일: 일자 기준 평균 비율 / 요일 기준 백업 비율 ──
+    # 평일: 일자 기준 평균 비율 / 요일 기준 백업 비율
     ratio_by_day = (
         df_recent[weekday_mask].groupby("일")["ratio"].mean()
         if df_recent[weekday_mask].size > 0
@@ -253,7 +246,7 @@ def make_daily_plan_table(
         else pd.Series(dtype=float)
     )
 
-    # ── 주말: (요일, nth_dow) 기준 평균 비율 / 요일 기준 백업 비율 ──
+    # 주말: (요일, nth_dow) 기준 평균 비율 / 요일 기준 백업 비율
     ratio_weekend_group = (
         df_recent[weekend_mask]
         .groupby(["weekday_idx", "nth_dow"])["ratio"]
@@ -289,7 +282,7 @@ def make_daily_plan_table(
     weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
     df_target["요일"] = df_target["weekday_idx"].map(lambda i: weekday_names[i])
 
-    # 대상 월에서도 요일별로 몇 번째인지 계산 (토요일1, 토요일2 ...)
+    # 대상 월에서도 요일별로 몇 번째인지 계산
     df_target["nth_dow"] = (
         df_target.sort_values("일")
         .groupby("weekday_idx")
@@ -297,7 +290,7 @@ def make_daily_plan_table(
         + 1
     )
 
-    # 공휴일여부는 일단 False (나중에 공휴일 캘린더 붙일 때 여기서 채우면 됨)
+    # 공휴일여부(향후 캘린더 붙여서 활용)
     df_target["공휴일여부"] = False
 
     def _label(row):
@@ -305,7 +298,7 @@ def make_daily_plan_table(
 
     df_target["구분(평일/주말)"] = df_target.apply(_label, axis=1)
 
-    # ── 1단계: 주말 비율 확정 ─────────────────────────
+    # 1단계: 주말 비율 확정
     def _weekend_ratio(row):
         dow = row["weekday_idx"]
         nth = row["nth_dow"]
@@ -328,7 +321,6 @@ def make_daily_plan_table(
     df_target["weekend_raw"] = 0.0
     df_target["weekday_raw"] = 0.0
 
-    # 주말/평일별 raw ratio 채우기
     for idx, row in df_target.iterrows():
         if row["is_weekend"]:
             val = _weekend_ratio(row)
@@ -337,7 +329,7 @@ def make_daily_plan_table(
             val = _weekday_ratio(row)
             df_target.at[idx, "weekday_raw"] = val if val is not None else np.nan
 
-    # NaN 처리: 주말/평일 각각에서 평균으로 채우고, 그래도 없으면 0
+    # NaN 처리
     if df_target["weekend_raw"].notna().any():
         mean_wend = df_target["weekend_raw"].dropna().mean()
         df_target["weekend_raw"] = df_target["weekend_raw"].fillna(mean_wend)
@@ -357,7 +349,6 @@ def make_daily_plan_table(
     if weekend_raw_sum + weekday_raw_sum <= 0:
         df_target["일별비율"] = 1.0 / last_day
     else:
-        # 1차 스케일링: 주말+평일 합이 1이 되도록 전체 스케일
         total_raw = weekend_raw_sum + weekday_raw_sum
         scale_all = 1.0 / total_raw
 
@@ -367,24 +358,21 @@ def make_daily_plan_table(
         # 남은 비율(평일 몫)
         rest_share = max(1.0 - weekend_total_share, 0.0)
 
-        # 2단계: 남은 비율을 평일 raw 비율 비중대로 재분배
         if weekday_raw_sum > 0 and rest_share > 0:
             weekday_norm = df_target["weekday_raw"] / weekday_raw_sum
             df_target["weekday_scaled"] = weekday_norm * rest_share
         else:
-            # 평일 정보가 없으면 남은 비율을 전체 일수 기준 균등 분배
             df_target["weekday_scaled"] = rest_share / last_day
 
         df_target["일별비율"] = df_target["weekend_scaled"] + df_target["weekday_scaled"]
 
-        # 수치 오차 때문에 합이 완전히 1이 아닐 수 있으니 한 번 더 정규화
         total_ratio = df_target["일별비율"].sum()
         if total_ratio > 0:
             df_target["일별비율"] = df_target["일별비율"] / total_ratio
         else:
             df_target["일별비율"] = 1.0 / last_day
 
-    # ── 최근 N년 기준 총·평균 공급량 (설명용) ──────────────────
+    # 최근 N년 기준 총·평균 공급량
     month_total_all = df_recent["공급량(MJ)"].sum()
     df_target["최근N년_총공급량(MJ)"] = df_target["일별비율"] * month_total_all
     df_target["최근N년_평균공급량(MJ)"] = (
@@ -598,7 +586,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         fig_hm = go.Figure(
             data=go.Heatmap(
                 z=df_mat.values,
-                x=[str(c) for c in df_mat.columns],  # 연도 문자열
+                x=[str(c) for c in df_mat.columns],
                 y=df_mat.index,
                 colorbar_title="공급량(MJ)",
                 colorscale="RdBu_r",
@@ -612,7 +600,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         )
         st.plotly_chart(fig_hm, use_container_width=False)
 
-    # 4. 평일·주말 비중 요약 (합계 행 포함)
+    # 4. 평일·주말 비중 요약
     st.markdown("#### 4. 평일·주말 비중 요약")
 
     summary = (
@@ -631,7 +619,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     summary = format_table_generic(summary, percent_cols=["일별비율합계"])
     st.table(center_style(summary))
 
-    # 5. 엑셀 다운로드 (합계행 포함)
+    # 5. 엑셀 다운로드
     st.markdown("#### 5. 일별 계획 엑셀 다운로드")
 
     buffer = BytesIO()
@@ -658,11 +646,11 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
     min_year_model = int(df["연도"].min())
     max_year_model = int(df["연도"].max())
 
-    # 기온 전체 구간 연도 범위 (매트릭스/시나리오용)
+    # 기온 전체 구간 연도 범위
     min_year_temp = int(df_temp_all["연도"].min())
     max_year_temp = int(df_temp_all["연도"].max())
 
-    # ── 0. 상관도 분석 ───────────────────────────
+    # 0. 상관도 분석
     st.subheader("📊 0. 상관도 분석 (공급량 vs 주요 변수)")
 
     df_corr_raw = load_corr_data()
@@ -675,13 +663,11 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
         if len(num_cols) >= 2:
             corr = num_df.corr()
 
-            # 색을 너무 진하게 쓰지 않도록, 표시용 값은 ±0.7으로 클리핑
             z = corr.values
             z_display = np.clip(z, -0.7, 0.7)
-            text = corr.round(2).astype(str).values   # 소수점 2자리
+            text = corr.round(2).astype(str).values   # 매트릭스 안 숫자도 2자리
 
-            # 정사각형 도화지 (조금 작게 해서 우측 표와 간격 줄이기)
-            side = 600
+            side = 600  # 정사각형 크기
 
             nice_colorscale = [
                 [0.0, "#313695"],
@@ -717,7 +703,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
                 ),
                 yaxis=dict(autorange="reversed"),
                 width=side,
-                height=side,  # 정사각형
+                height=side,
                 margin=dict(l=80, r=20, t=80, b=80),
             )
 
@@ -735,22 +721,27 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
                 target_series = target_series.reindex(
                     target_series.abs().sort_values(ascending=False).index
                 )
-                # 표도 소수점 2자리
-                tbl_df = target_series.round(2).to_frame(name="상관계수")
 
-                # 컬럼 비율을 2:1로 조정해서 표를 좀 더 왼쪽으로
-                col_hm, col_tbl = st.columns([2, 1])
+                # 표용 데이터 (소숫점 2자리 문자열)
+                tbl_df = target_series.to_frame(name="상관계수")
+                tbl_df_disp = tbl_df.copy()
+                tbl_df_disp["상관계수"] = tbl_df_disp["상관계수"].map(
+                    lambda x: f"{x:.2f}"
+                )
+
+                # 두 컴포넌트를 컬럼으로 바로 붙이기 (3:2 비율)
+                col_hm, col_tbl = st.columns([3, 2])
                 with col_hm:
-                    st.plotly_chart(fig_corr, use_container_width=False)
+                    st.plotly_chart(fig_corr, use_container_width=True)
                 with col_tbl:
                     st.markdown(
                         f"**기준 변수: `{target_col}` 과(와) 다른 변수들의 상관계수**"
                     )
-                    st.table(center_style(tbl_df))
+                    st.table(center_style(tbl_df_disp))
         else:
             st.caption("숫자 컬럼이 2개 미만이라 상관도 분석을 할 수 없어.")
 
-    # ── ① 데이터 학습기간 선택 ───────────────────
+    # ① 데이터 학습기간 선택
     st.subheader("📚 ① 데이터 학습기간 선택 (3차 다항식 R² 계산용)")
 
     train_default_start = max(min_year_model, max_year_model - 4)
@@ -796,7 +787,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
     else:
         df_window["예측공급량_MJ"] = np.nan
 
-    # ── R² 비교 ───────────────────────────────
+    # R² 비교
     st.markdown("##### 월평균 vs 일평균 기온 기반 R² 비교 (학습기간 기준)")
 
     col1, col2 = st.columns(2)
@@ -816,7 +807,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
         else:
             st.write("일 단위 회귀에 필요한 데이터가 부족해.")
 
-    # ── 산점도 + 곡선 ──────────────────────────
+    # 산점도 + 곡선
     st.subheader("📈 기온–공급량 관계 (실적 vs 3차 다항식 곡선)")
 
     col3, col4 = st.columns(2)
@@ -844,7 +835,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
             )
             st.plotly_chart(fig_d, use_container_width=True)
 
-    # ── ② 기온 시나리오 연도 범위 선택 ──────────
+    # ② 기온 시나리오 연도 범위 선택
     st.subheader("🧊 ② 기온 시나리오 연도 범위 선택 (월평균 vs 일평균 예측 비교용)")
 
     scen_default_start = max(min_year_temp, max_year_temp - 4)
@@ -853,7 +844,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
     with col_scen:
         scen_start, scen_end = st.slider(
             "기온 시나리오에 사용할 연도 범위",
-            min_value=min_year_temp,     # 기온 전체 구간 기준 (1980 포함)
+            min_value=min_year_temp,
             max_value=max_year_temp,
             value=(scen_default_start, max_year_temp),
             step=1,
@@ -909,7 +900,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
             f"일단위 Poly-3 예측합(MJ) - 기온 {scen_start}~{scen_end}년 평균"
         )
 
-    # 예측/실적 연도 선택 (공급량이 있는 연도만)
+    # 예측/실적 연도 선택
     st.markdown("##### 예측/실적 연도 선택")
 
     year_options = sorted(df["연도"].unique())
@@ -932,7 +923,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
         )
         monthly_actual.name = f"{pred_year}년 실적(MJ)"
 
-    # ── 월별 예측 vs 실적 라인그래프 ───────────────
+    # 월별 예측 vs 실적
     st.subheader("🔥 월별 예측 vs 실적 — 월단위 Poly-3 vs 일단위 Poly-3(합산)")
 
     month_index = list(range(1, 13))
@@ -952,7 +943,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
 
     colors = {}
     if monthly_actual is not None:
-        colors[monthly_actual.name] = "red"           # 실적 = 붉은색
+        colors[monthly_actual.name] = "red"
     if monthly_pred_from_month_model is not None:
         colors[monthly_pred_from_month_model.name] = "#1f77b4"
     if monthly_pred_from_daily_model is not None:
@@ -995,7 +986,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
     df_compare_view = format_table_generic(df_compare_view)
     st.table(center_style(df_compare_view))
 
-    # ── 연간 소계 ───────────────────────────────
+    # 연간 소계
     if (
         (monthly_actual is not None)
         and (monthly_pred_from_month_model is not None)
@@ -1023,11 +1014,10 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
         )
         st.table(center_style(summary_view))
 
-    # ── ③ 기온 매트릭스 (일별 평균기온) ───────────
+    # ③ 기온 매트릭스
     st.subheader("🌡️ ③ 기온 매트릭스 (일별 평균기온)")
 
-    # 기온 전체 구간(평균기온만 있는 데이터) 기준
-    mat_slider_min = min_year_temp   # 1980까지 가능
+    mat_slider_min = min_year_temp
     mat_slider_max = max_year_temp
     mat_default_start = mat_slider_min
 
@@ -1044,7 +1034,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
         month_sel = st.selectbox(
             "월 선택",
             list(range(1, 12 + 1)),
-            index=9,  # 10월
+            index=9,
         )
 
     df_mat = df_temp_all[
@@ -1066,8 +1056,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
         .sort_index(axis=1)
     )
 
-    # 정사각형 도화지 (20% 크게)
-    side_hm = int(700 * 1.2)  # 840 정도
+    side_hm = int(700 * 1.2)  # 20% 크게
 
     fig_hm = go.Figure(
         data=go.Heatmap(
@@ -1083,7 +1072,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
         xaxis_title="연도",
         yaxis_title="일",
         width=side_hm,
-        height=side_hm,  # 정사각형
+        height=side_hm,
         margin=dict(l=20, r=20, t=40, b=40),
     )
 
@@ -1094,8 +1083,6 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
 # 메인
 # ─────────────────────────────────────────────
 def main():
-    st.title("도시가스 공급량 — 일별 vs 월별 기온기반 3차 다항식 예측력 비교")
-
     df, df_temp_all = load_daily_data()
 
     mode = st.sidebar.radio(
@@ -1105,8 +1092,12 @@ def main():
     )
 
     if mode == "📅 Daily 공급량 분석":
+        # 탭1에서 보이는 상단 큰 제목
+        st.title("도시가스 공급량 — 일별계획 예측")
         tab_daily_plan(df_daily=df)
     else:
+        # 탭2에서 보이는 상단 큰 제목
+        st.title("도시가스 공급량 — 일별 vs 월별 예측 검증")
         tab_daily_monthly_compare(df=df, df_temp_all=df_temp_all)
 
 
