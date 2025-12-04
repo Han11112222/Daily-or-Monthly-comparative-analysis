@@ -215,17 +215,17 @@ def center_style(df: pd.DataFrame):
 
 # ─────────────────────────────────────────────
 # Daily 공급량 분석용 함수
-#   - 설/추석 및 전후 하루(징검다리) 패턴을 별도로 학습해서 반영
-#   - 나머지 평일/주말 로직은 기존과 동일
+#   - 설/추석 및 전후 하루(징검다리) 패턴을 별도 그룹으로 학습
+#   - 그룹별 월 비중(평일/주말/명절)을 먼저 맞추고, 그 안에서 일별 패턴 분배
 # ─────────────────────────────────────────────
-def make_daily_plan_table(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target_year: int = 2026, target_month: int = 1, recent_window: int = 3) -> tuple[pd.DataFrame | None, pd.DataFrame | None, list[int]]:
-    """
-    최근 recent_window년 같은 월의 일별 공급 패턴으로
-    target_year/target_month 일별 비율과 일별 계획 공급량을 계산.
+def make_daily_plan_table(
+    df_daily: pd.DataFrame,
+    df_plan: pd.DataFrame,
+    target_year: int = 2026,
+    target_month: int = 1,
+    recent_window: int = 3,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None, list[int]]:
 
-    토·일 + 공휴일 + 명절(설날/추석 등)을 모두 '주말' 패턴으로 묶어서 사용하되,
-    명절 당일 및 전후 하루(징검다리 포함)는 과거 명절 패턴을 별도로 학습해서 반영.
-    """
     cal_df = load_effective_calendar()
 
     # 사용 가능한 연도 범위
@@ -282,24 +282,43 @@ def make_daily_plan_table(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target_
     # 주말 정의: 토/일 OR 공휴일/명절
     df_recent["is_weekend"] = (df_recent["weekday_idx"] >= 5) | df_recent["is_holiday"]
 
-    # 연도별 월 합계
+    # 연도별 월 합계 및 일별 비율
     df_recent["month_total"] = (
         df_recent.groupby("연도")["공급량(MJ)"].transform("sum")
     )
     df_recent["ratio"] = df_recent["공급량(MJ)"] / df_recent["month_total"]
 
-    # 같은 연도·요일(월~일) 내에서 몇 번째 요일인지 (1번째 토요일, 2번째 토요일 ...)
-    df_recent["nth_dow"] = (
-        df_recent.sort_values(["연도", "일"])
-        .groupby(["연도", "weekday_idx"])
-        .cumcount()
-        + 1
+    # 그룹 레이블: 평일 / 주말 / 명절블록
+    df_recent["grp"] = np.where(
+        df_recent["festival_block"],
+        "festival",
+        np.where(df_recent["is_weekend"], "weekend", "weekday"),
     )
 
-    weekday_mask = ~df_recent["is_weekend"]
-    weekend_mask = df_recent["is_weekend"]
     festival_mask_recent = df_recent["festival_block"].fillna(False)
+    weekday_mask = (~df_recent["is_weekend"]) & (~festival_mask_recent)
+    weekend_mask = df_recent["is_weekend"] & (~festival_mask_recent)
 
+    # ── (1) 그룹별 월 비중 계산 (연도별 → 평균) ──
+    shares_by_year = (
+        df_recent.groupby(["연도", "grp"])["ratio"]
+        .sum()
+        .reset_index()
+    )
+    pivot_share = shares_by_year.pivot(index="연도", columns="grp", values="ratio").fillna(0.0)
+
+    R_weekday = float(pivot_share["weekday"].mean()) if "weekday" in pivot_share else 0.0
+    R_weekend = float(pivot_share["weekend"].mean()) if "weekend" in pivot_share else 0.0
+    R_festival = float(pivot_share["festival"].mean()) if "festival" in pivot_share else 0.0
+
+    # 안전하게 한 번 더 정규화 (합=1 보장)
+    sum_R = R_weekday + R_weekend + R_festival
+    if sum_R > 0:
+        R_weekday /= sum_R
+        R_weekend /= sum_R
+        R_festival /= sum_R
+
+    # ── (2) 그룹 내부 모양(일별 패턴) 학습 ──
     # 평일: 일자 기준 평균 비율 / 요일 기준 백업 비율
     ratio_by_day = (
         df_recent[weekday_mask].groupby("일")["ratio"].mean()
@@ -312,7 +331,13 @@ def make_daily_plan_table(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target_
         else pd.Series(dtype=float)
     )
 
-    # 주말(토·일 + 공휴일/명절): (요일, nth_dow) 기준 평균 비율 / 요일 기준 백업 비율
+    # 주말(토·일 + 공휴일/명절, 단 명절블록 제외): (요일, nth_dow) + 요일 기준
+    df_recent["nth_dow"] = (
+        df_recent.sort_values(["연도", "일"])
+        .groupby(["연도", "weekday_idx"])
+        .cumcount()
+        + 1
+    )
     ratio_weekend_group = (
         df_recent[weekend_mask]
         .groupby(["weekday_idx", "nth_dow"])["ratio"]
@@ -326,14 +351,14 @@ def make_daily_plan_table(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target_
         else pd.Series(dtype=float)
     )
 
-    # 명절 블록 비율 (offset별 + 전체 평균)
+    # 명절 블록: offset(-1,0,1) 기준 + 전체 평균
     if festival_mask_recent.any():
         ratio_festival_by_offset = (
             df_recent[festival_mask_recent]
             .groupby("festival_offset")["ratio"]
             .mean()
         ).to_dict()
-        ratio_festival_global = df_recent[festival_mask_recent]["ratio"].mean()
+        ratio_festival_global = float(df_recent[festival_mask_recent]["ratio"].mean())
     else:
         ratio_festival_by_offset = {}
         ratio_festival_global = None
@@ -344,7 +369,9 @@ def make_daily_plan_table(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target_
     ratio_weekend_group_dict = ratio_weekend_group.to_dict()
     ratio_weekend_by_dow_dict = ratio_weekend_by_dow.to_dict()
 
+    # ─────────────────────────────────────────
     # 대상 연·월 날짜 생성
+    # ─────────────────────────────────────────
     last_day = calendar.monthrange(target_year, target_month)[1]
     date_range = pd.date_range(
         f"{target_year}-{target_month:02d}-01", periods=last_day, freq="D"
@@ -404,12 +431,19 @@ def make_daily_plan_table(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target_
         + 1
     )
 
+    # 그룹 레이블 (target)
+    df_target["grp"] = np.where(
+        df_target["festival_block"],
+        "festival",
+        np.where(df_target["is_weekend"], "weekend", "weekday"),
+    )
+
     def _label(row):
-        return "주말" if row["is_weekend"] else "평일"
+        return "주말" if row["grp"] == "weekend" else ("평일" if row["grp"] == "weekday" else "명절블록")
 
     df_target["구분(평일/주말)"] = df_target.apply(_label, axis=1)
 
-    # 1단계: 주말 비율 확정
+    # ── 1단계: 각 그룹 내 raw weight 계산 ──
     def _weekend_ratio(row):
         dow = row["weekday_idx"]
         nth = row["nth_dow"]
@@ -429,76 +463,86 @@ def make_daily_plan_table(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target_
             val = ratio_weekday_by_dow_dict.get(dow, None)
         return val
 
-    df_target["weekend_raw"] = 0.0
-    df_target["weekday_raw"] = 0.0
+    df_target["weekday_raw"] = np.nan
+    df_target["weekend_raw"] = np.nan
+    df_target["festival_raw"] = np.nan
 
     festival_info_available = ratio_festival_global is not None
 
     for idx, row in df_target.iterrows():
+        grp = row["grp"]
         val = None
 
-        # ① 명절 블록 우선: 설/추석 및 전후 하루(징검다리 평일·주말 모두)
-        if festival_info_available and bool(row.get("festival_block", False)):
+        if grp == "festival" and festival_info_available:
             offset = row.get("festival_offset", np.nan)
             if not np.isnan(offset) and offset in ratio_festival_by_offset:
                 val = ratio_festival_by_offset[offset]
             else:
                 val = ratio_festival_global
 
-        # ② 그 외에는 기존 로직(평일/주말) 적용
-        if row["is_weekend"]:
-            if val is None:
-                val = _weekend_ratio(row)
+            df_target.at[idx, "festival_raw"] = val if val is not None else np.nan
+
+        elif grp == "weekend":
+            val = _weekend_ratio(row)
             df_target.at[idx, "weekend_raw"] = val if val is not None else np.nan
-        else:
-            if val is None:
-                val = _weekday_ratio(row)
+
+        else:  # weekday
+            val = _weekday_ratio(row)
             df_target.at[idx, "weekday_raw"] = val if val is not None else np.nan
 
-    # NaN 처리
-    if df_target["weekend_raw"].notna().any():
-        mean_wend = df_target["weekend_raw"].dropna().mean()
-        df_target["weekend_raw"] = df_target["weekend_raw"].fillna(mean_wend)
+    # ── NaN 보정: 그룹 내 평균으로 채움 ──
+    for col, grp_name in [
+        ("weekday_raw", "weekday"),
+        ("weekend_raw", "weekend"),
+        ("festival_raw", "festival"),
+    ]:
+        mask = df_target["grp"] == grp_name
+        if mask.any():
+            series = df_target.loc[mask, col]
+            if series.notna().any():
+                mean_val = series.dropna().mean()
+                df_target.loc[mask, col] = series.fillna(mean_val)
+            else:
+                df_target.loc[mask, col] = 0.0
+        else:
+            df_target[col] = df_target[col].fillna(0.0)
+
+    # ── 2단계: 그룹별 목표 비중(R_)에 맞춰 정규화 ──
+    df_target["ratio"] = 0.0
+    group_shares = {
+        "weekday": R_weekday,
+        "weekend": R_weekend,
+        "festival": R_festival,
+    }
+
+    for grp_name, col in [
+        ("weekday", "weekday_raw"),
+        ("weekend", "weekend_raw"),
+        ("festival", "festival_raw"),
+    ]:
+        mask = df_target["grp"] == grp_name
+        target_share = group_shares.get(grp_name, 0.0)
+
+        if not mask.any() or target_share <= 0:
+            continue
+
+        raw_sum = float(df_target.loc[mask, col].sum())
+        if raw_sum <= 0:
+            # raw 정보가 거의 없으면 해당 그룹 안에서 균등 분배
+            df_target.loc[mask, "ratio"] = target_share / mask.sum()
+        else:
+            df_target.loc[mask, "ratio"] = (
+                df_target.loc[mask, col] / raw_sum * target_share
+            )
+
+    # 전체 합이 1이 되도록 한 번 더 보정
+    total_ratio = float(df_target["ratio"].sum())
+    if total_ratio > 0:
+        df_target["일별비율"] = df_target["ratio"] / total_ratio
     else:
-        df_target["weekend_raw"] = 0.0
-
-    if df_target["weekday_raw"].notna().any():
-        mean_wday = df_target["weekday_raw"].dropna().mean()
-        df_target["weekday_raw"] = df_target["weekday_raw"].fillna(mean_wday)
-    else:
-        df_target["weekday_raw"] = 0.0
-
-    weekend_raw_sum = df_target["weekend_raw"].sum()
-    weekday_raw_sum = df_target["weekday_raw"].sum()
-
-    # 전체 비율 합(주말+평일)이 0이면 균등 분배
-    if weekend_raw_sum + weekday_raw_sum <= 0:
         df_target["일별비율"] = 1.0 / last_day
-    else:
-        total_raw = weekend_raw_sum + weekday_raw_sum
-        scale_all = 1.0 / total_raw
 
-        df_target["weekend_scaled"] = df_target["weekend_raw"] * scale_all
-        weekend_total_share = df_target["weekend_scaled"].sum()
-
-        # 남은 비율(평일 몫)
-        rest_share = max(1.0 - weekend_total_share, 0.0)
-
-        if weekday_raw_sum > 0 and rest_share > 0:
-            weekday_norm = df_target["weekday_raw"] / weekday_raw_sum
-            df_target["weekday_scaled"] = weekday_norm * rest_share
-        else:
-            df_target["weekday_scaled"] = rest_share / last_day
-
-        df_target["일별비율"] = df_target["weekend_scaled"] + df_target["weekday_scaled"]
-
-        total_ratio = df_target["일별비율"].sum()
-        if total_ratio > 0:
-            df_target["일별비율"] = df_target["일별비율"] / total_ratio
-        else:
-            df_target["일별비율"] = 1.0 / last_day
-
-    # 최근 N년 기준 총·평균 공급량
+    # ── 최근 N년 기준 총·평균 공급량 계산 ──
     month_total_all = df_recent["공급량(MJ)"].sum()
     df_target["최근N년_총공급량(MJ)"] = df_target["일별비율"] * month_total_all
     df_target["최근N년_평균공급량(MJ)"] = (
@@ -766,7 +810,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
 # ─────────────────────────────────────────────
 # 탭2: Daily·Monthly 공급량 비교
-# (여기는 너가 처음 준 코드 그대로 – 변경 없음)
+# (여기는 처음 준 코드 그대로 – 변경 없음)
 # ─────────────────────────────────────────────
 def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
     # 공급량이 있는 구간(예측/R²용) 연도 범위
