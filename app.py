@@ -1048,13 +1048,20 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
 
     fig_line = go.Figure()
     for col in df_compare.columns:
+        # 실적: 진한 실선
+        if monthly_actual is not None and col == monthly_actual.name:
+            line_style = dict(color=colors.get(col, None), width=3)
+        # 월단위/일단위 예측: 점선
+        else:
+            line_style = dict(color=colors.get(col, None), width=2, dash="dot")
+
         fig_line.add_trace(
             go.Scatter(
                 x=list(df_compare.index),
                 y=df_compare[col],
                 mode="lines+markers",
                 name=col,
-                line=dict(color=colors.get(col, None)),
+                line=line_style,
             )
         )
 
