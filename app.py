@@ -700,7 +700,26 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         ws = wb[sheet_name]
 
         last_row = ws.max_row       # 헤더 포함 마지막 행 번호
-        last_col = ws.max_column    # 기존 마지막 열 (예상공급량(MJ) = K열)
+        last_col = ws.max_column    # 기존 마지막 열
+
+        # 헤더에서 '일별비율', '예상공급량(MJ)' 위치 찾기
+        ratio_col_idx = None
+        total_col_idx = None
+        for c in range(1, last_col + 1):
+            header = ws.cell(row=1, column=c).value
+            if header == "일별비율":
+                ratio_col_idx = c
+            elif header == "예상공급량(MJ)":
+                total_col_idx = c
+
+        # 혹시 못 찾으면 디폴트(J=10, K=11)
+        if ratio_col_idx is None:
+            ratio_col_idx = 10
+        if total_col_idx is None:
+            total_col_idx = 11
+
+        ratio_col_letter = get_column_letter(ratio_col_idx)
+        total_col_letter = get_column_letter(total_col_idx)
 
         # 새 열(예상공급량 수식) 추가
         formula_col = last_col + 1
@@ -708,11 +727,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
         ws.cell(row=1, column=formula_col, value="예상공급량(MJ)_수식")
 
-        # 일별비율(J열), 예상공급량 합계(K마지막행)을 이용한 수식
-        ratio_col_letter = "J"   # 일별비율
-        total_col_letter = "K"   # 예상공급량(MJ) (합계행 포함)
-
-        # 데이터 행(2행 ~ 마지막-1행) 수식 입력
+        # 일별비율 * 예상공급량 합계(마지막행)를 이용한 수식
         for r in range(2, last_row):
             ws.cell(
                 row=r,
@@ -725,6 +740,14 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             row=last_row,
             column=formula_col,
             value=f"=SUM({formula_col_letter}2:{formula_col_letter}{last_row-1})",
+        )
+
+        # 🔹 마지막 합계 행의 '일별비율' 셀을 SUM 수식으로 변경
+        #    → 다운로드 후 J마지막행을 보면 일별비율 합계 수식이 보임
+        ws.cell(
+            row=last_row,
+            column=ratio_col_idx,
+            value=f"=SUM({ratio_col_letter}2:{ratio_col_letter}{last_row-1})",
         )
 
     st.download_button(
