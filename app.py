@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from openpyxl.utils import get_column_letter  # ← 추가
 
 
 # ─────────────────────────────────────────────
@@ -685,11 +686,45 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     st.markdown("#### 5. 일별 계획 엑셀 다운로드")
 
     buffer = BytesIO()
+    sheet_name = f"{target_year}_{target_month:02d}_일별계획"
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        # 기본 데이터 먼저 기록
         view_with_total.to_excel(
             writer,
             index=False,
-            sheet_name=f"{target_year}_{target_month:02d}_일별계획",
+            sheet_name=sheet_name,
+        )
+
+        # 엑셀 워크북/시트 객체 가져오기
+        wb = writer.book
+        ws = wb[sheet_name]
+
+        last_row = ws.max_row       # 헤더 포함 마지막 행 번호
+        last_col = ws.max_column    # 기존 마지막 열 (예상공급량(MJ) = K열)
+
+        # 새 열(예상공급량 수식) 추가
+        formula_col = last_col + 1
+        formula_col_letter = get_column_letter(formula_col)
+
+        ws.cell(row=1, column=formula_col, value="예상공급량(MJ)_수식")
+
+        # 일별비율(J열), 예상공급량 합계(K마지막행)을 이용한 수식
+        ratio_col_letter = "J"   # 일별비율
+        total_col_letter = "K"   # 예상공급량(MJ) (합계행 포함)
+
+        # 데이터 행(2행 ~ 마지막-1행) 수식 입력
+        for r in range(2, last_row):
+            ws.cell(
+                row=r,
+                column=formula_col,
+                value=f"=ROUND(${ratio_col_letter}{r}*${total_col_letter}${last_row},0)",
+            )
+
+        # 마지막 합계 행은 수식열도 합계로
+        ws.cell(
+            row=last_row,
+            column=formula_col,
+            value=f"=SUM({formula_col_letter}2:{formula_col_letter}{last_row-1})",
         )
 
     st.download_button(
