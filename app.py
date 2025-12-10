@@ -701,53 +701,78 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
         last_row = ws.max_row       # 헤더 포함 마지막 행 번호
         last_col = ws.max_column    # 기존 마지막 열
+        data_last_row = last_row - 1
 
-        # 헤더에서 '일별비율', '예상공급량(MJ)' 위치 찾기
-        ratio_col_idx = None
-        total_col_idx = None
+        # 헤더에서 주요 열 위치 찾기
+        ratio_col_idx = None              # "일별비율"
+        total_col_idx = None              # "예상공급량(MJ)"
+        recent_total_idx = None           # "최근N년_총공급량(MJ)"
+
         for c in range(1, last_col + 1):
             header = ws.cell(row=1, column=c).value
             if header == "일별비율":
                 ratio_col_idx = c
             elif header == "예상공급량(MJ)":
                 total_col_idx = c
+            elif header == "최근N년_총공급량(MJ)":
+                recent_total_idx = c
 
-        # 혹시 못 찾으면 디폴트(J=10, K=11)
+        # 못 찾으면 디폴트 위치로
+        if recent_total_idx is None:
+            recent_total_idx = 9   # I열
         if ratio_col_idx is None:
-            ratio_col_idx = 10
+            ratio_col_idx = 10     # J열
         if total_col_idx is None:
-            total_col_idx = 11
+            total_col_idx = 11     # K열
 
         ratio_col_letter = get_column_letter(ratio_col_idx)
         total_col_letter = get_column_letter(total_col_idx)
+        recent_total_letter = get_column_letter(recent_total_idx)
 
-        # 새 열(예상공급량 수식) 추가
-        formula_col = last_col + 1
-        formula_col_letter = get_column_letter(formula_col)
+        # ── 5-1. 합계 행 수식 세팅 (I, J, K) ──
+        ws.cell(
+            row=last_row,
+            column=recent_total_idx,
+            value=f"=SUM({recent_total_letter}2:{recent_total_letter}{data_last_row})",
+        )
+        ws.cell(
+            row=last_row,
+            column=ratio_col_idx,
+            value=f"=SUM({ratio_col_letter}2:{ratio_col_letter}{data_last_row})",
+        )
+        ws.cell(
+            row=last_row,
+            column=total_col_idx,
+            value=f"=SUM({total_col_letter}2:{total_col_letter}{data_last_row})",
+        )
 
-        ws.cell(row=1, column=formula_col, value="예상공급량(MJ)_수식")
-
-        # 일별비율 * 예상공급량 합계(마지막행)를 이용한 수식
-        for r in range(2, last_row):
+        # ── 5-2. 일별비율(J열) 자체를 수식으로 변경: I열 / I합계 ──
+        for r in range(2, data_last_row + 1):
             ws.cell(
                 row=r,
-                column=formula_col,
+                column=ratio_col_idx,
+                value=f"={recent_total_letter}{r}/${recent_total_letter}${last_row}",
+            )
+
+        # ── 5-3. 새 열: 예상공급량(MJ)_수식 ──
+        formula_col_idx = last_col + 1
+        formula_col_letter = get_column_letter(formula_col_idx)
+
+        ws.cell(row=1, column=formula_col_idx, value="예상공급량(MJ)_수식")
+
+        # 데이터 행(2행 ~ data_last_row) 수식 입력
+        for r in range(2, data_last_row + 1):
+            ws.cell(
+                row=r,
+                column=formula_col_idx,
                 value=f"=ROUND(${ratio_col_letter}{r}*${total_col_letter}${last_row},0)",
             )
 
         # 마지막 합계 행은 수식열도 합계로
         ws.cell(
             row=last_row,
-            column=formula_col,
-            value=f"=SUM({formula_col_letter}2:{formula_col_letter}{last_row-1})",
-        )
-
-        # 🔹 마지막 합계 행의 '일별비율' 셀을 SUM 수식으로 변경
-        #    → 다운로드 후 J마지막행을 보면 일별비율 합계 수식이 보임
-        ws.cell(
-            row=last_row,
-            column=ratio_col_idx,
-            value=f"=SUM({ratio_col_letter}2:{ratio_col_letter}{last_row-1})",
+            column=formula_col_idx,
+            value=f"=SUM({formula_col_letter}2:{formula_col_letter}{data_last_row})",
         )
 
     st.download_button(
@@ -810,6 +835,8 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
                     zmid=0,
                     colorbar_title="상관계수",
                     text=text,
+           
+
                     texttemplate="%{text}",
                     textfont=dict(size=10, color="black"),
                 )
@@ -1143,6 +1170,9 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
 
     # ③ 기온 매트릭스
     st.subheader("🌡️ ③ 기온 매트릭스 (일별 평균기온)")
+
+    min_year_temp = int(df_temp_all["연도"].min())
+    max_year_temp = int(df_temp_all["연도"].max())
 
     mat_slider_min = min_year_temp
     mat_slider_max = max_year_temp
