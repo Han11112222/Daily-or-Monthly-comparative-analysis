@@ -257,7 +257,7 @@ def make_daily_plan_table(
             on="일자",
             how="left",
         )
-        df_recent["공휴일여부"] = df_recent["공휴일여부"].fillna(False).astype(bool)
+        df_recent["공휴일여부"] = df_recent["공휴일여버"].fillna(False).astype(bool) if "공휴일여버" in df_recent.columns else df_recent["공휴일여부"].fillna(False).astype(bool)
         df_recent["명절여부"] = df_recent["명절여부"].fillna(False).astype(bool)
     else:
         df_recent["공휴일여부"] = False
@@ -688,133 +688,119 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     buffer = BytesIO()
     sheet_name = f"{target_year}_{target_month:02d}_일별계획"
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        # 기본 데이터 먼저 기록
+        # 기본 데이터 먼저 기록 (메인 시트)
         view_with_total.to_excel(
             writer,
             index=False,
             sheet_name=sheet_name,
         )
 
-        # 엑셀 워크북/시트 객체 가져오기
         wb = writer.book
         ws = wb[sheet_name]
 
         last_row = ws.max_row       # 헤더 포함 마지막 행 번호
-        last_col = ws.max_column    # 기존 마지막 열
-        data_last_row = last_row - 1
+        last_col = ws.max_column    # 기존 마지막 열 (예상공급량(MJ))
 
-        # 헤더에서 주요 열 위치 찾기
-        ratio_col_idx = None              # "일별비율"
-        total_col_idx = None              # "예상공급량(MJ)"
-        recent_total_idx = None           # "최근N년_총공급량(MJ)"
+        # ── 5-1. 기존: 예상공급량(MJ)_수식 열 추가 ──
+        formula_col = last_col + 1
+        formula_col_letter = get_column_letter(formula_col)
 
-        for c in range(1, last_col + 1):
-            header = ws.cell(row=1, column=c).value
-            if header == "일별비율":
-                ratio_col_idx = c
-            elif header == "예상공급량(MJ)":
-                total_col_idx = c
-            elif header == "최근N년_총공급량(MJ)":
-                recent_total_idx = c
+        ws.cell(row=1, column=formula_col, value="예상공급량(MJ)_수식")
 
-        # 못 찾으면 디폴트 위치로
-        if recent_total_idx is None:
-            recent_total_idx = 9   # I열
-        if ratio_col_idx is None:
-            ratio_col_idx = 10     # J열
-        if total_col_idx is None:
-            total_col_idx = 11     # K열
+        # 일별비율(J열), 예상공급량 합계(K마지막행)을 이용한 수식
+        ratio_col_letter = "J"   # 일별비율
+        total_col_letter = "K"   # 예상공급량(MJ) (합계행 포함)
 
-        ratio_col_letter = get_column_letter(ratio_col_idx)
-        total_col_letter = get_column_letter(total_col_idx)
-        recent_total_letter = get_column_letter(recent_total_idx)
-
-        # ── 5-1. 합계 행 수식 세팅 (I, J, K) ──
-        ws.cell(
-            row=last_row,
-            column=recent_total_idx,
-            value=f"=SUM({recent_total_letter}2:{recent_total_letter}{data_last_row})",
-        )
-        ws.cell(
-            row=last_row,
-            column=ratio_col_idx,
-            value=f"=SUM({ratio_col_letter}2:{ratio_col_letter}{data_last_row})",
-        )
-        ws.cell(
-            row=last_row,
-            column=total_col_idx,
-            value=f"=SUM({total_col_letter}2:{total_col_letter}{data_last_row})",
-        )
-
-        # ── 5-2. 일별비율(J열) 자체를 수식으로 변경: I열 / I합계 ──
-        for r in range(2, data_last_row + 1):
+        # 데이터 행(2행 ~ 마지막-1행) 수식 입력
+        for r in range(2, last_row):
             ws.cell(
                 row=r,
-                column=ratio_col_idx,
-                value=f"={recent_total_letter}{r}/${recent_total_letter}${last_row}",
-            )
-
-        # ── 5-3. 새 열: 예상공급량(MJ)_수식 ──
-        formula_col_idx = last_col + 1
-        formula_col_letter = get_column_letter(formula_col_idx)
-
-        ws.cell(row=1, column=formula_col_idx, value="예상공급량(MJ)_수식")
-
-        # 데이터 행(2행 ~ data_last_row) 수식 입력
-        for r in range(2, data_last_row + 1):
-            ws.cell(
-                row=r,
-                column=formula_col_idx,
+                column=formula_col,
                 value=f"=ROUND(${ratio_col_letter}{r}*${total_col_letter}${last_row},0)",
             )
 
         # 마지막 합계 행은 수식열도 합계로
         ws.cell(
             row=last_row,
-            column=formula_col_idx,
-            value=f"=SUM({formula_col_letter}2:{formula_col_letter}{data_last_row})",
+            column=formula_col,
+            value=f"=SUM({formula_col_letter}2:{formula_col_letter}{last_row-1})",
         )
 
-        # ── 5-4. 최근N년_총공급량/평균공급량 수식 열 추가 ──
-        base_formula_start = ws.max_column + 1
+        # ── 5-2. 최근N년 연도별 시트 생성 + 연도별 월합계 셀 주소 수집 ──
+        year_total_cells = []
+        if df_mat is not None and len(recent_years) > 0:
+            for y in recent_years:
+                if y not in df_mat.columns:
+                    continue
 
-        total_formula_col_idx = base_formula_start
-        avg_formula_col_idx = base_formula_start + 1
+                sheet_y = str(y)
+                # 일별 공급량(MJ) 시트: A열=일, B열=공급량(MJ)
+                df_year = pd.DataFrame(
+                    {
+                        "일": df_mat.index,
+                        "공급량(MJ)": df_mat[y].values,
+                    }
+                )
+                df_year.to_excel(
+                    writer,
+                    index=False,
+                    sheet_name=sheet_y,
+                )
 
-        total_formula_col_letter = get_column_letter(total_formula_col_idx)
-        avg_formula_col_letter = get_column_letter(avg_formula_col_idx)
+                ws_y = wb[sheet_y]
+                data_last_row = ws_y.max_row  # 1(헤더) + 일수
+                total_row_y = data_last_row + 1
 
-        ws.cell(row=1, column=total_formula_col_idx, value="최근N년_총공급량(MJ)_수식")
-        ws.cell(row=1, column=avg_formula_col_idx, value="최근N년_평균공급량(MJ)_수식")
+                ws_y.cell(row=total_row_y, column=1, value="합계")
+                ws_y.cell(
+                    row=total_row_y,
+                    column=2,
+                    value=f"=SUM(B2:B{data_last_row})",
+                )
 
-        n_years = len(recent_years)
+                year_total_cells.append(f"'{sheet_y}'!$B${total_row_y}")
 
-        # 각 일자 행에 수식 입력
-        for r in range(2, data_last_row + 1):
-            # 총공급량 수식: 월합계(I합계) × 일별비율(J행)
+        # ── 5-3. 최근N년_총공급량/평균공급량 수식 열 추가 ──
+        # 기존 예상공급량(MJ)_수식 뒤에 2개 열 추가
+        recent_total_col = formula_col + 1
+        recent_avg_col = formula_col + 2
+        recent_total_col_letter = get_column_letter(recent_total_col)
+        recent_avg_col_letter = get_column_letter(recent_avg_col)
+
+        ws.cell(row=1, column=recent_total_col, value="최근N년_총공급량(MJ)_수식")
+        ws.cell(row=1, column=recent_avg_col, value="최근N년_평균공급량(MJ)_수식")
+
+        if year_total_cells:
+            # 예: '2023'!$B$32+'2024'!$B$32+'2025'!$B$32
+            recent_total_expr = "+".join(year_total_cells)
+            n_years = len(year_total_cells)
+
+            # 각 일자 행에 대해:
+            # 최근N년_총공급량(MJ)_수식 = ROUND(일별비율 * (각 연도 월합계 합산),0)
+            # 최근N년_평균공급량(MJ)_수식 = ROUND(최근N년_총공급량(MJ)_수식 / N,0)
+            for r in range(2, last_row):
+                ws.cell(
+                    row=r,
+                    column=recent_total_col,
+                    value=f"=ROUND(${ratio_col_letter}{r}*({recent_total_expr}),0)",
+                )
+                ws.cell(
+                    row=r,
+                    column=recent_avg_col,
+                    value=f"=ROUND({recent_total_col_letter}{r}/{n_years},0)",
+                )
+
+            # 마지막 합계 행은 두 열 모두 합계로
             ws.cell(
-                row=r,
-                column=total_formula_col_idx,
-                value=f"=${recent_total_letter}${last_row}*{ratio_col_letter}{r}",
+                row=last_row,
+                column=recent_total_col,
+                value=f"=SUM({recent_total_col_letter}2:{recent_total_col_letter}{last_row-1})",
             )
-            # 평균공급량 수식: (총공급량 수식) / 최근N년 개수
             ws.cell(
-                row=r,
-                column=avg_formula_col_idx,
-                value=f"={total_formula_col_letter}{r}/{n_years}",
+                row=last_row,
+                column=recent_avg_col,
+                value=f"=SUM({recent_avg_col_letter}2:{recent_avg_col_letter}{last_row-1})",
             )
-
-        # 마지막 행: 두 수식 열도 합계
-        ws.cell(
-            row=last_row,
-            column=total_formula_col_idx,
-            value=f"=SUM({total_formula_col_letter}2:{total_formula_col_letter}{data_last_row})",
-        )
-        ws.cell(
-            row=last_row,
-            column=avg_formula_col_idx,
-            value=f"=SUM({avg_formula_col_letter}2:{avg_formula_col_letter}{data_last_row})",
-        )
 
     st.download_button(
         label=f"📥 {target_year}년 {target_month}월 일별공급계획 다운로드 (Excel)",
@@ -1230,16 +1216,16 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
             index=9,
         )
 
-    df_mat = df_temp_all[
+    df_mat_temp = df_temp_all[
         (df_temp_all["연도"].between(mat_start, mat_end))
         & (df_temp_all["월"] == month_sel)
     ].copy()
-    if df_mat.empty:
+    if df_mat_temp.empty:
         st.write("선택한 연도/월 범위에 대한 기온 데이터가 없어.")
         return
 
     pivot = (
-        df_mat.pivot_table(
+        df_mat_temp.pivot_table(
             index="일",
             columns="연도",
             values="평균기온(℃)",
