@@ -775,6 +775,47 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             value=f"=SUM({formula_col_letter}2:{formula_col_letter}{data_last_row})",
         )
 
+        # ── 5-4. 최근N년_총공급량/평균공급량 수식 열 추가 ──
+        base_formula_start = ws.max_column + 1
+
+        total_formula_col_idx = base_formula_start
+        avg_formula_col_idx = base_formula_start + 1
+
+        total_formula_col_letter = get_column_letter(total_formula_col_idx)
+        avg_formula_col_letter = get_column_letter(avg_formula_col_idx)
+
+        ws.cell(row=1, column=total_formula_col_idx, value="최근N년_총공급량(MJ)_수식")
+        ws.cell(row=1, column=avg_formula_col_idx, value="최근N년_평균공급량(MJ)_수식")
+
+        n_years = len(recent_years)
+
+        # 각 일자 행에 수식 입력
+        for r in range(2, data_last_row + 1):
+            # 총공급량 수식: 월합계(I합계) × 일별비율(J행)
+            ws.cell(
+                row=r,
+                column=total_formula_col_idx,
+                value=f"=${recent_total_letter}${last_row}*{ratio_col_letter}{r}",
+            )
+            # 평균공급량 수식: (총공급량 수식) / 최근N년 개수
+            ws.cell(
+                row=r,
+                column=avg_formula_col_idx,
+                value=f"={total_formula_col_letter}{r}/{n_years}",
+            )
+
+        # 마지막 행: 두 수식 열도 합계
+        ws.cell(
+            row=last_row,
+            column=total_formula_col_idx,
+            value=f"=SUM({total_formula_col_letter}2:{total_formula_col_letter}{data_last_row})",
+        )
+        ws.cell(
+            row=last_row,
+            column=avg_formula_col_idx,
+            value=f"=SUM({avg_formula_col_letter}2:{avg_formula_col_letter}{data_last_row})",
+        )
+
     st.download_button(
         label=f"📥 {target_year}년 {target_month}월 일별공급계획 다운로드 (Excel)",
         data=buffer.getvalue(),
@@ -835,8 +876,6 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
                     zmid=0,
                     colorbar_title="상관계수",
                     text=text,
-           
-
                     texttemplate="%{text}",
                     textfont=dict(size=10, color="black"),
                 )
@@ -1170,9 +1209,6 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
 
     # ③ 기온 매트릭스
     st.subheader("🌡️ ③ 기온 매트릭스 (일별 평균기온)")
-
-    min_year_temp = int(df_temp_all["연도"].min())
-    max_year_temp = int(df_temp_all["연도"].max())
 
     mat_slider_min = min_year_temp
     mat_slider_max = max_year_temp
