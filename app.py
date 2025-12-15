@@ -6,7 +6,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from openpyxl.utils import get_column_letter  # ← 추가
+from openpyxl.utils import get_column_letter  # ← 기존
+from openpyxl.styles import Alignment, Font   # ← (다운로드 엑셀 설명시트 꾸미기용) 추가
 
 
 # ─────────────────────────────────────────────
@@ -549,6 +550,10 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         f"(총 {len(recent_years)}개 연도)"
     )
 
+    # (설명시트용) 월 계획총량 원값
+    row_plan = df_plan[(df_plan["연"] == target_year) & (df_plan["월"] == target_month)]
+    plan_total_raw = float(row_plan["계획(사업계획제출_MJ)"].iloc[0]) if not row_plan.empty else np.nan
+
     plan_total = df_result["예상공급량(MJ)"].sum()
     st.markdown(
         f"**{target_year}년 {target_month}월 사업계획 제출 공급량 합계:** "
@@ -698,35 +703,27 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         wb = writer.book
         ws = wb[sheet_name]
 
+        # ─────────────────────────────────────────────
+        # (다운로드 엑셀 내 설명/산식이 보이도록) 헤더 기반 컬럼 찾기
+        # ─────────────────────────────────────────────
+        def _header_map(_ws):
+            m = {}
+            for c in range(1, _ws.max_column + 1):
+                v = _ws.cell(row=1, column=c).value
+                if isinstance(v, str) and v.strip():
+                    m[v.strip()] = c
+            return m
+
+        hmap = _header_map(ws)
+        ratio_col_idx = hmap.get("일별비율", None)
+        pred_col_idx = hmap.get("예상공급량(MJ)", None)
+
         last_row = ws.max_row       # 헤더 포함 마지막 행 번호
-        last_col = ws.max_column    # 기존 마지막 열 (예상공급량(MJ))
+        last_col = ws.max_column    # 기존 마지막 열
 
-        # ── 5-1. 기존: 예상공급량(MJ)_수식 열 추가 ──
-        formula_col = last_col + 1
-        formula_col_letter = get_column_letter(formula_col)
-
-        ws.cell(row=1, column=formula_col, value="예상공급량(MJ)_수식")
-
-        # 일별비율(J열), 예상공급량 합계(K마지막행)을 이용한 수식
-        ratio_col_letter = "J"   # 일별비율
-        total_col_letter = "K"   # 예상공급량(MJ) (합계행 포함)
-
-        # 데이터 행(2행 ~ 마지막-1행) 수식 입력
-        for r in range(2, last_row):
-            ws.cell(
-                row=r,
-                column=formula_col,
-                value=f"=ROUND(${ratio_col_letter}{r}*${total_col_letter}${last_row},0)",
-            )
-
-        # 마지막 합계 행은 수식열도 합계로
-        ws.cell(
-            row=last_row,
-            column=formula_col,
-            value=f"=SUM({formula_col_letter}2:{formula_col_letter}{last_row-1})",
-        )
-
-        # ── 5-2. 최근N년 연도별 시트 생성 + 연도별 월합계 셀 주소 수집 ──
+        # ─────────────────────────────────────────────
+        # 5-0) 최근N년(연도별) 근거 시트 생성 + "해당연도 일별비율" 수식 추가
+        # ─────────────────────────────────────────────
         year_total_cells = []
         if df_mat is not None and len(recent_years) > 0:
             for y in recent_years:
@@ -734,7 +731,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                     continue
 
                 sheet_y = str(y)
-                # 일별 공급량(MJ) 시트: A열=일, B열=공급량(MJ)
+
                 df_year = pd.DataFrame(
                     {
                         "일": df_mat.index,
@@ -751,6 +748,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 data_last_row = ws_y.max_row  # 1(헤더) + 일수
                 total_row_y = data_last_row + 1
 
+                # 합계 행
                 ws_y.cell(row=total_row_y, column=1, value="합계")
                 ws_y.cell(
                     row=total_row_y,
@@ -758,26 +756,67 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                     value=f"=SUM(B2:B{data_last_row})",
                 )
 
+                # C열: 해당연도 일별비율(=일별실적/월합계)
+                ws_y.cell(row=1, column=3, value="일별비율(해당연도)=일별/월합계")
+                for r in range(2, data_last_row + 1):
+                    ws_y.cell(
+                        row=r,
+                        column=3,
+                        value=f"=IFERROR(B{r}/$B${total_row_y},0)",
+                    )
+                # 합계행 C도 1이 되게(검증용)
+                ws_y.cell(
+                    row=total_row_y,
+                    column=3,
+                    value=f"=SUM(C2:C{data_last_row})",
+                )
+
+                # 월합계 셀 주소 기록(나중에 INPUT에서 참조)
                 year_total_cells.append(f"'{sheet_y}'!$B${total_row_y}")
 
-        # ── 5-3. 최근N년_총공급량/평균공급량 수식 열 추가 ──
-        # 기존 예상공급량(MJ)_수식 뒤에 2개 열 추가
+        # ─────────────────────────────────────────────
+        # 5-1) 기존: 예상공급량(MJ)_수식 열 추가 (원래 로직 유지)
+        # ─────────────────────────────────────────────
+        formula_col = last_col + 1
+        ws.cell(row=1, column=formula_col, value="예상공급량(MJ)_수식(비율*월합계)")
+
+        # 기존 코드가 가정하던 컬럼 위치가 바뀌지 않도록: 헤더 기반으로 안전하게
+        if ratio_col_idx is None:
+            ratio_col_idx = 10  # fallback
+        ratio_col_letter = get_column_letter(ratio_col_idx)
+
+        if pred_col_idx is None:
+            pred_col_idx = 11  # fallback
+        pred_col_letter = get_column_letter(pred_col_idx)
+
+        # 합계(월계획총량에 해당) = "예상공급량(MJ)" 마지막행
+        for r in range(2, last_row):
+            ws.cell(
+                row=r,
+                column=formula_col,
+                value=f"=ROUND(${ratio_col_letter}{r}*${pred_col_letter}${last_row},0)",
+            )
+        ws.cell(
+            row=last_row,
+            column=formula_col,
+            value=f"=SUM({get_column_letter(formula_col)}2:{get_column_letter(formula_col)}{last_row-1})",
+        )
+
+        # ─────────────────────────────────────────────
+        # 5-2) 최근N년_총공급량/평균공급량 수식 열 추가 (기존 유지)
+        # ─────────────────────────────────────────────
         recent_total_col = formula_col + 1
         recent_avg_col = formula_col + 2
         recent_total_col_letter = get_column_letter(recent_total_col)
         recent_avg_col_letter = get_column_letter(recent_avg_col)
 
-        ws.cell(row=1, column=recent_total_col, value="최근N년_총공급량(MJ)_수식")
-        ws.cell(row=1, column=recent_avg_col, value="최근N년_평균공급량(MJ)_수식")
+        ws.cell(row=1, column=recent_total_col, value="최근N년_총공급량(MJ)_수식(비율*최근N년월합)")
+        ws.cell(row=1, column=recent_avg_col, value="최근N년_평균공급량(MJ)_수식(총/N)")
 
         if year_total_cells:
-            # 예: '2023'!$B$32+'2024'!$B$32+'2025'!$B$32
             recent_total_expr = "+".join(year_total_cells)
             n_years = len(year_total_cells)
 
-            # 각 일자 행에 대해:
-            # 최근N년_총공급량(MJ)_수식 = ROUND(일별비율 * (각 연도 월합계 합산),0)
-            # 최근N년_평균공급량(MJ)_수식 = ROUND(최근N년_총공급량(MJ)_수식 / N,0)
             for r in range(2, last_row):
                 ws.cell(
                     row=r,
@@ -790,7 +829,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                     value=f"=ROUND({recent_total_col_letter}{r}/{n_years},0)",
                 )
 
-            # 마지막 합계 행은 두 열 모두 합계로
             ws.cell(
                 row=last_row,
                 column=recent_total_col,
@@ -801,6 +839,160 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 column=recent_avg_col,
                 value=f"=SUM({recent_avg_col_letter}2:{recent_avg_col_letter}{last_row-1})",
             )
+
+        # ─────────────────────────────────────────────
+        # 5-3) INPUT 시트: “월계획총량/사용연도/연도별 월합계 참조”를 한곳에 모아두기
+        # ─────────────────────────────────────────────
+        input_sheet = "INPUT"
+        if input_sheet in wb.sheetnames:
+            wb.remove(wb[input_sheet])
+        ws_in = wb.create_sheet(input_sheet)
+
+        ws_in["A1"] = "항목"
+        ws_in["B1"] = "값"
+        ws_in["C1"] = "비고(셀/참조)"
+        for cell in ("A1", "B1", "C1"):
+            ws_in[cell].font = Font(bold=True)
+
+        rows = [
+            ("대상연도", target_year, ""),
+            ("대상월", target_month, ""),
+            ("최근N년(설정)", recent_window, ""),
+            ("실제 사용된 연도", ", ".join([str(y) for y in recent_years]), ""),
+            ("월 계획총량(MJ) (사업계획제출)", plan_total_raw, "공급량(계획_실적).xlsx → 월별계획_실적"),
+        ]
+
+        r0 = 2
+        for i, (k, v, note) in enumerate(rows):
+            rr = r0 + i
+            ws_in.cell(rr, 1, k)
+            ws_in.cell(rr, 2, v)
+            ws_in.cell(rr, 3, note)
+
+        # 연도별 월합계 참조(해당연도 시트의 합계셀)
+        base = r0 + len(rows) + 1
+        ws_in.cell(base, 1, "최근N년 연도별 월합계(MJ) 참조")
+        ws_in.cell(base, 1).font = Font(bold=True)
+
+        rr = base + 1
+        for idx, ref in enumerate(year_total_cells, start=1):
+            ws_in.cell(rr, 1, f"연도합계{idx}")
+            ws_in.cell(rr, 2, f"={ref}")
+            ws_in.cell(rr, 3, ref)
+            rr += 1
+
+        # 최근N년 월합계(합산) 셀
+        ws_in.cell(rr, 1, "최근N년 월합계(MJ) 합산")
+        if year_total_cells:
+            ws_in.cell(rr, 2, "=" + "+".join([ref for ref in year_total_cells]))
+        else:
+            ws_in.cell(rr, 2, "")
+        ws_in.cell(rr, 3, "연도별 월합계의 합")
+
+        # 월 계획총량 셀 주소 (설명시트/검산용으로 고정)
+        plan_cell_addr = "B6"  # rows 구성상 6행(B6)
+        ws_in["E1"] = "고정참조"
+        ws_in["E2"] = "월계획총량셀"
+        ws_in["F2"] = f"={input_sheet}!${plan_cell_addr}"
+        ws_in["E1"].font = Font(bold=True)
+
+        # 보기 좋게 줄바꿈
+        for row in ws_in.iter_rows(min_row=1, max_row=ws_in.max_row, min_col=1, max_col=3):
+            for c in row:
+                c.alignment = Alignment(vertical="top", wrap_text=True)
+
+        # ─────────────────────────────────────────────
+        # 5-4) 설명(README) 시트: 산식/로직을 “엑셀 안에서” 읽으면 이해되게
+        # ─────────────────────────────────────────────
+        readme_sheet = "설명_README"
+        if readme_sheet in wb.sheetnames:
+            wb.remove(wb[readme_sheet])
+        ws_rd = wb.create_sheet(readme_sheet)
+
+        ws_rd["A1"] = "일별계획 산식/로직 설명"
+        ws_rd["A1"].font = Font(bold=True, size=14)
+
+        main_sheet_ref = sheet_name
+
+        lines = [
+            "1) 필요한 입력 데이터",
+            f"   - 최근 N년(예: 2023~2025) 동일 월의 '일별 실적 공급량(MJ)'",
+            "   - 대상 월의 '월 계획총량(MJ)' (사업계획 제출값)",
+            "",
+            "2) 연도별 월합계 및 연도별 일별비율(근거)",
+            "   - 각 연도 시트(예: '2023')에서",
+            "     · 월합계(MJ) = SUM(해당월 일별실적)",
+            "     · 연도별 일별비율 = (해당일 실적) / (월합계)",
+            "   - 엑셀에서 직접 확인 가능:",
+            "     · 연도 시트 B열=일별실적, B합계행=월합계",
+            "     · 연도 시트 C열=일별비율(해당연도)=B/월합계 (수식 포함)",
+            "",
+            "3) 최종 '일별비율'(메인 시트) 산정 로직(요약)",
+            "   본 파일의 메인 시트 '일별비율'은 단순히 '예상공급량/월합계'로 역산한 값이 아니라,",
+            "   최근 N년의 패턴에서 '해당 월 내 각 날짜가 차지하는 비중'을 만든 값임.",
+            "",
+            "   - 평일(월~금): '일자(1~31)별' 비율을 최근 N년 평균",
+            "     (예: 1일(평일) 비율 = 최근 N년 1일(평일) 비율 평균)",
+            "   - 주말/공휴일/명절: '요일(토/일) + 그 달의 몇 번째(1번째 토요일, 2번째 토요일...)' 기준 평균",
+            "     (공휴일/명절도 주말 패턴으로 묶음)",
+            "   - 일부 케이스 데이터가 부족하면 '요일 평균'으로 보정",
+            "   - 마지막에 일별비율 합계가 1이 되도록 정규화",
+            "",
+            "4) 최종 '예상공급량(MJ)' 계산식",
+            "   예상공급량(MJ) = 월 계획총량(MJ) × 일별비율",
+            "",
+            "5) 엑셀에서 바로 검증하는 방법(권장)",
+            f"   - 메인 시트({main_sheet_ref})에서",
+            "     · 일별비율 합계(마지막 행)가 1.0000인지 확인",
+            "     · 예상공급량(MJ) 합계(마지막 행)가 월 계획총량과 동일(또는 반올림 차이 ±몇 MJ)한지 확인",
+            "",
+            "6) 셀 위치(참조)",
+            f"   - 메인 시트: '{main_sheet_ref}'",
+            f"     · 일별비율 컬럼 = {get_column_letter(ratio_col_idx)}열",
+            f"     · 예상공급량(MJ) 컬럼 = {get_column_letter(pred_col_idx)}열",
+            "   - INPUT 시트:",
+            f"     · 월 계획총량(MJ) = INPUT!{plan_cell_addr}",
+        ]
+
+        # A3부터 작성
+        ws_rd["A3"] = "\n".join(lines)
+        ws_rd["A3"].alignment = Alignment(vertical="top", wrap_text=True)
+        ws_rd.column_dimensions["A"].width = 110
+        ws_rd.row_dimensions[3].height = 520
+
+        # 조금 더 친절하게: 메인 시트에 "월계획총량" 참조 열 1개 추가(이해용)
+        add_col_1 = recent_avg_col + 1
+        add_col_2 = recent_avg_col + 2
+        ws.cell(row=1, column=add_col_1, value="월계획총량(MJ)_참조(INPUT)")
+        ws.cell(row=1, column=add_col_2, value="예상공급량(MJ)_산식(비율*월계획)")
+
+        add_col_2_letter = get_column_letter(add_col_2)
+        add_col_1_letter = get_column_letter(add_col_1)
+
+        for r in range(2, last_row):
+            ws.cell(row=r, column=add_col_1, value=f"=INPUT!${plan_cell_addr}")
+            ws.cell(
+                row=r,
+                column=add_col_2,
+                value=f"=ROUND(${ratio_col_letter}{r}*{add_col_1_letter}{r},0)",
+            )
+
+        # 합계행
+        ws.cell(row=last_row, column=add_col_1, value="")
+        ws.cell(
+            row=last_row,
+            column=add_col_2,
+            value=f"=SUM({add_col_2_letter}2:{add_col_2_letter}{last_row-1})",
+        )
+
+        # 메인/INPUT/설명 시트 상단 고정(가독성)
+        ws.freeze_panes = "A2"
+        ws_in.freeze_panes = "A2"
+        ws_rd.freeze_panes = "A2"
+
+        # 설명시트를 맨 앞에 오게 정렬
+        # (openpyxl은 직접 index 조정이 번거로워서: 새로 만든 순서상 뒤에 있지만, 시트탭에서 바로 보이도록 이름을 강조)
+        # 필요하면 사용자가 직접 탭을 앞으로 옮기면 됨.
 
     st.download_button(
         label=f"📥 {target_year}년 {target_month}월 일별공급계획 다운로드 (Excel)",
