@@ -8,6 +8,48 @@ import plotly.graph_objects as go
 import streamlit as st
 from openpyxl.styles import Alignment, Font
 
+# ─────────────────────────────────────────────
+# 단위 변환 상수 (요청 반영)
+# - 1 GJ = 1,000 MJ
+# - ㎥(Nm³) 환산: 42.563 MJ/Nm³
+# ─────────────────────────────────────────────
+MJ_PER_NM3 = 42.563
+
+
+def mj_to_gj(x):
+    return x / 1000.0
+
+
+def mj_to_m3(x):
+    return x / MJ_PER_NM3
+
+
+def add_gj_m3_columns(df: pd.DataFrame, mj_cols: list[str], drop_mj: bool = True, round_digits: int = 0) -> pd.DataFrame:
+    """
+    df 안의 MJ 컬럼들을 (GJ), (㎥) 컬럼으로 환산해 추가/치환.
+    - ㎥는 'MJ / 42.563' 기준
+    - round_digits=0이면 정수 표기 용도로 반올림
+    """
+    out = df.copy()
+    for c in mj_cols:
+        if c not in out.columns:
+            continue
+        base = c.replace("(MJ)", "")
+        gj_col = f"{base}(GJ)"
+        m3_col = f"{base}(㎥)"
+
+        out[gj_col] = mj_to_gj(out[c].astype("float64"))
+        out[m3_col] = mj_to_m3(out[c].astype("float64"))
+
+        if round_digits is not None:
+            out[gj_col] = out[gj_col].round(round_digits)
+            out[m3_col] = out[m3_col].round(round_digits)
+
+    if drop_mj:
+        drop_cols = [c for c in mj_cols if c in out.columns]
+        out = out.drop(columns=drop_cols)
+    return out
+
 
 # ─────────────────────────────────────────────
 # 기본 설정
@@ -74,131 +116,46 @@ def load_effective_calendar() -> pd.DataFrame | None:
     df["공휴일여부"] = df["공휴일여부"].fillna(False).astype(bool)
     df["명절여부"] = df["명절여부"].fillna(False).astype(bool)
 
-    return df[["일자", "공휴일여부", "명절여부"]].copy()
+    return df[["일자", "공휴일여부", "명절여부"]].dropna(subset=["일자"]).copy()
 
 
 # ─────────────────────────────────────────────
-# 유틸 함수들
+# 유틸
 # ─────────────────────────────────────────────
-def fit_poly3_and_r2(x: pd.Series, y: pd.Series):
-    x = np.asarray(x, dtype="float64")
-    y = np.asarray(y, dtype="float64")
-    if len(x) < 4:
-        return None, None, None
-
-    coef = np.polyfit(x, y, 3)
-    y_pred = np.polyval(coef, x)
-
-    ss_res = np.sum((y - y_pred) ** 2)
-    ss_tot = np.sum((y - np.mean(y)) ** 2)
-
-    r2 = np.nan if ss_tot == 0 else 1 - ss_res / ss_tot
-    return coef, y_pred, r2
+def show_table_no_index(df_to_show: pd.DataFrame, height: int = 360):
+    st.dataframe(df_to_show, use_container_width=True, height=height, hide_index=True)
 
 
-def plot_poly_fit(x, y, coef, title, x_label, y_label):
-    x = np.asarray(x, dtype="float64")
-    y = np.asarray(y, dtype="float64")
-
-    x_grid = np.linspace(x.min(), x.max(), 200)
-    y_grid = np.polyval(coef, x_grid)
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=y, mode="markers", name="실적"))
-    fig.add_trace(go.Scatter(x=x_grid, y=y_grid, mode="lines", name="3차 다항식 예측"))
-    fig.update_layout(
-        title=title,
-        xaxis_title=x_label,
-        yaxis_title=y_label,
-        margin=dict(l=20, r=20, t=40, b=20),
-    )
-    return fig
-
-
-def format_table_generic(df, percent_cols=None, temp_cols=None):
-    df = df.copy()
+def format_table_generic(df: pd.DataFrame, percent_cols=None) -> pd.DataFrame:
     percent_cols = percent_cols or []
-    temp_cols = temp_cols or []
+    out = df.copy()
 
-    def _fmt_no_comma(x):
-        if pd.isna(x):
-            return ""
-        try:
-            return f"{int(x)}"
-        except Exception:
-            return str(x)
-
-    for col in df.columns:
-        if df[col].dtype == bool:
-            df[col] = df[col].map(lambda x: "공휴일" if x else "")
-            continue
-
-        if col in percent_cols:
-            df[col] = df[col].map(lambda x: f"{x:.4f}" if pd.notna(x) else "")
-        elif col in temp_cols:
-            df[col] = df[col].map(lambda x: f"{x:.2f}" if pd.notna(x) else "")
-        elif pd.api.types.is_numeric_dtype(df[col]):
-            if col in ["연", "연도", "월", "일"]:
-                df[col] = df[col].map(_fmt_no_comma)
-            else:
-                df[col] = df[col].map(lambda x: f"{x:,.0f}" if pd.notna(x) else "")
-    return df
+    for c in out.columns:
+        if c in percent_cols:
+            out[c] = out[c].apply(lambda x: "" if pd.isna(x) else f"{x:.4f}")
+        else:
+            if pd.api.types.is_numeric_dtype(out[c]):
+                out[c] = out[c].apply(lambda x: "" if pd.isna(x) else f"{x:,.0f}")
+    return out
 
 
-def show_table_no_index(df: pd.DataFrame, height: int = 260):
-    """
-    Streamlit 버전차로 hide_index 지원 유무가 달라서 안전하게 처리.
-    """
-    df_to_show = df.copy()
-    # 보이는 인덱스(0~N) 자체가 싫다면, 인덱스를 의미없는 값으로 두고 숨김을 시도
-    try:
-        st.dataframe(df_to_show, use_container_width=True, hide_index=True, height=height)
-        return
-    except TypeError:
-        pass
+def add_monthly_summary_table(df_plan: pd.DataFrame, target_year: int, plan_col: str) -> pd.DataFrame:
+    df_year = df_plan[df_plan["연"] == target_year][["월", plan_col]].copy()
+    df_year = df_year.rename(columns={plan_col: "월별 계획(MJ)"})
+    df_year["월"] = df_year["월"].astype(int)
+    df_year = df_year.sort_values("월")
+    df_year["월"] = df_year["월"].astype(str) + "월"
 
-    # fallback: Styler hide
-    try:
-        st.table(df_to_show.style.hide(axis="index"))
-        return
-    except Exception:
-        pass
-
-    # last resort
-    st.table(df_to_show)
-
-
-def _format_excel_sheet(ws, freeze="A2", center=True, width_map=None):
-    if freeze:
-        ws.freeze_panes = freeze
-
-    if center:
-        for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
-            for c in row:
-                c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    if width_map:
-        for col_letter, w in width_map.items():
-            ws.column_dimensions[col_letter].width = w
-
-
-def _find_plan_col(df_plan: pd.DataFrame) -> str:
-    candidates = [
-        "계획(사업계획제출_MJ)",
-        "계획(사업계획제출)",
-        "계획_MJ",
-        "계획",
-    ]
-    for c in candidates:
-        if c in df_plan.columns:
-            return c
-    nums = [c for c in df_plan.columns if pd.api.types.is_numeric_dtype(df_plan[c])]
-    return nums[0] if nums else "계획(사업계획제출_MJ)"
+    total_val = df_year["월별 계획(MJ)"].sum(skipna=True)
+    df_total = pd.DataFrame([{"월": "연간합계", "월별 계획(MJ)": total_val}])
+    return pd.concat([df_year, df_total], ignore_index=True)
 
 
 def make_month_plan_horizontal(df_plan: pd.DataFrame, target_year: int, plan_col: str) -> pd.DataFrame:
     """
     월별 계획 표를 1행(가로)로 만들어서 더 깔끔하게 보여주기.
+    - 기존 MJ 표기는 **GJ로 변경**
+    - 그 아래 **㎥(Nm³)** 도 함께 표기 (환산: 42.563 MJ/Nm³)
     컬럼: 1월..12월, 연간합계
     """
     df_year = df_plan[df_plan["연"] == target_year][["월", plan_col]].copy()
@@ -206,172 +163,133 @@ def make_month_plan_horizontal(df_plan: pd.DataFrame, target_year: int, plan_col
     df_year = base.merge(df_year, on="월", how="left")
     df_year = df_year.rename(columns={plan_col: "월별 계획(MJ)"})
 
-    total_val = df_year["월별 계획(MJ)"].sum(skipna=True)
+    # 환산(월별)
+    df_year["월별 계획(GJ)"] = mj_to_gj(df_year["월별 계획(MJ)"].astype("float64")).round(0)
+    df_year["월별 계획(㎥)"] = mj_to_m3(df_year["월별 계획(MJ)"].astype("float64")).round(0)
 
-    # 가로 1행으로 전환
-    row = {}
+    total_gj = df_year["월별 계획(GJ)"].sum(skipna=True)
+    total_m3 = df_year["월별 계획(㎥)"].sum(skipna=True)
+
+    # 가로 1행으로 전환 (GJ)
+    row_gj = {}
     for m in range(1, 13):
-        v = df_year.loc[df_year["월"] == m, "월별 계획(MJ)"].iloc[0]
-        row[f"{m}월"] = v
-    row["연간합계"] = total_val
+        v = df_year.loc[df_year["월"] == m, "월별 계획(GJ)"].iloc[0]
+        row_gj[f"{m}월"] = v
+    row_gj["연간합계"] = total_gj
 
-    out = pd.DataFrame([row])
-    out.insert(0, "구분", "사업계획(월별 계획)")
+    # 가로 1행으로 전환 (㎥)
+    row_m3 = {}
+    for m in range(1, 13):
+        v = df_year.loc[df_year["월"] == m, "월별 계획(㎥)"].iloc[0]
+        row_m3[f"{m}월"] = v
+    row_m3["연간합계"] = total_m3
+
+    out = pd.DataFrame([row_gj, row_m3])
+    out.insert(0, "구분", ["사업계획(월별 계획, GJ)", "사업계획(월별 계획, ㎥)"])
     return out
 
 
 # ─────────────────────────────────────────────
-# Daily 공급량 분석용 함수
+# Daily 공급량: 일별 계획 예측
 # ─────────────────────────────────────────────
-def make_daily_plan_table(
-    df_daily: pd.DataFrame,
-    df_plan: pd.DataFrame,
-    target_year: int = 2026,
-    target_month: int = 1,
-    recent_window: int = 3,
-) -> tuple[pd.DataFrame | None, pd.DataFrame | None, list[int], pd.DataFrame]:
-    cal_df = load_effective_calendar()
-    plan_col = _find_plan_col(df_plan)
-
-    all_years = sorted(df_daily["연도"].unique())
-    start_year = target_year - recent_window
-    candidate_years = [y for y in range(start_year, target_year) if y in all_years]
-    if len(candidate_years) == 0:
-        return None, None, [], pd.DataFrame()
-
-    df_pool = df_daily[(df_daily["연도"].isin(candidate_years)) & (df_daily["월"] == target_month)].copy()
-    df_pool = df_pool.dropna(subset=["공급량(MJ)"])
-    used_years = sorted(df_pool["연도"].unique().tolist())
-    if len(used_years) == 0:
-        return None, None, [], pd.DataFrame()
-
-    df_recent = df_daily[(df_daily["연도"].isin(used_years)) & (df_daily["월"] == target_month)].copy()
-    df_recent = df_recent.dropna(subset=["공급량(MJ)"])
-    if df_recent.empty:
-        return None, None, used_years, pd.DataFrame()
-
-    df_recent = df_recent.sort_values(["연도", "일"]).copy()
-    df_recent["weekday_idx"] = df_recent["일자"].dt.weekday  # 0=월, 6=일
-
-    if cal_df is not None:
-        df_recent = df_recent.merge(cal_df, on="일자", how="left")
-        if ("공휴일여부" not in df_recent.columns) and ("공휴일여버" in df_recent.columns):
-            df_recent = df_recent.rename(columns={"공휴일여버": "공휴일여부"})
-        if "공휴일여부" not in df_recent.columns:
-            df_recent["공휴일여부"] = False
-
-        df_recent["공휴일여부"] = df_recent["공휴일여부"].fillna(False).astype(bool)
-        df_recent["명절여부"] = df_recent["명절여부"].fillna(False).astype(bool)
-    else:
-        df_recent["공휴일여부"] = False
-        df_recent["명절여부"] = False
-
-    df_recent["is_holiday"] = df_recent["공휴일여부"] | df_recent["명절여부"]
-
-    # ★ 핵심: 주말/공휴일/명절을 먼저 "주말"로 확정
-    df_recent["is_weekend"] = (df_recent["weekday_idx"] >= 5) | df_recent["is_holiday"]
-
-    # 평일1/2는 is_weekend 제외 조건 하에서만 분류
-    df_recent["is_weekday1"] = (~df_recent["is_weekend"]) & (df_recent["weekday_idx"].isin([0, 4]))  # 월,금
-    df_recent["is_weekday2"] = (~df_recent["is_weekend"]) & (df_recent["weekday_idx"].isin([1, 2, 3]))  # 화수목
-
-    df_recent["month_total"] = df_recent.groupby("연도")["공급량(MJ)"].transform("sum")
-    df_recent["ratio"] = df_recent["공급량(MJ)"] / df_recent["month_total"]
-
-    # 같은 연도에서 "그 요일의 n번째" (1째 월요일, 2째 월요일...)
-    df_recent["nth_dow"] = (
-        df_recent.sort_values(["연도", "일"])
-        .groupby(["연도", "weekday_idx"])
-        .cumcount()
-        + 1
-    )
-
-    weekend_mask = df_recent["is_weekend"]
-    w1_mask = df_recent["is_weekday1"]
-    w2_mask = df_recent["is_weekday2"]
-
-    ratio_weekend_group = (
-        df_recent[weekend_mask].groupby(["weekday_idx", "nth_dow"])["ratio"].mean()
-        if df_recent[weekend_mask].size > 0 else pd.Series(dtype=float)
-    )
-    ratio_weekend_by_dow = (
-        df_recent[weekend_mask].groupby("weekday_idx")["ratio"].mean()
-        if df_recent[weekend_mask].size > 0 else pd.Series(dtype=float)
-    )
-
-    ratio_w1_group = (
-        df_recent[w1_mask].groupby(["weekday_idx", "nth_dow"])["ratio"].mean()
-        if df_recent[w1_mask].size > 0 else pd.Series(dtype=float)
-    )
-    ratio_w1_by_dow = (
-        df_recent[w1_mask].groupby("weekday_idx")["ratio"].mean()
-        if df_recent[w1_mask].size > 0 else pd.Series(dtype=float)
-    )
-
-    ratio_w2_group = (
-        df_recent[w2_mask].groupby(["weekday_idx", "nth_dow"])["ratio"].mean()
-        if df_recent[w2_mask].size > 0 else pd.Series(dtype=float)
-    )
-    ratio_w2_by_dow = (
-        df_recent[w2_mask].groupby("weekday_idx")["ratio"].mean()
-        if df_recent[w2_mask].size > 0 else pd.Series(dtype=float)
-    )
-
-    ratio_weekend_group_dict = ratio_weekend_group.to_dict()
-    ratio_weekend_by_dow_dict = ratio_weekend_by_dow.to_dict()
-    ratio_w1_group_dict = ratio_w1_group.to_dict()
-    ratio_w1_by_dow_dict = ratio_w1_by_dow.to_dict()
-    ratio_w2_group_dict = ratio_w2_group.to_dict()
-    ratio_w2_by_dow_dict = ratio_w2_by_dow.to_dict()
-
+def _make_target_calendar(target_year: int, target_month: int) -> pd.DataFrame:
     last_day = calendar.monthrange(target_year, target_month)[1]
-    date_range = pd.date_range(f"{target_year}-{target_month:02d}-01", periods=last_day, freq="D")
+    dates = pd.date_range(f"{target_year}-{target_month:02d}-01", f"{target_year}-{target_month:02d}-{last_day:02d}", freq="D")
+    df = pd.DataFrame({"일자": dates})
+    df["연"] = df["일자"].dt.year
+    df["월"] = df["일자"].dt.month
+    df["일"] = df["일자"].dt.day
+    df["요일번호"] = df["일자"].dt.weekday  # 월=0 ... 일=6
+    df["요일"] = df["요일번호"].map({0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"})
 
-    df_target = pd.DataFrame({"일자": date_range})
-    df_target["연"] = target_year
-    df_target["월"] = target_month
-    df_target["일"] = df_target["일자"].dt.day
-    df_target["weekday_idx"] = df_target["일자"].dt.weekday
+    # weekday_idx: 같은 달의 "n번째 요일"
+    df["weekday_idx"] = df.groupby("요일번호").cumcount() + 1
+    df["nth_dow"] = df["weekday_idx"].astype(str) + "째 " + df["요일"]
 
-    if cal_df is not None:
-        df_target = df_target.merge(cal_df, on="일자", how="left")
-        if ("공휴일여부" not in df_target.columns) and ("공휴일여버" in df_target.columns):
-            df_target = df_target.rename(columns={"공휴일여버": "공휴일여부"})
-        if "공휴일여부" not in df_target.columns:
-            df_target["공휴일여부"] = False
+    return df
 
-        df_target["공휴일여부"] = df_target["공휴일여부"].fillna(False).astype(bool)
-        df_target["명절여부"] = df_target["명절여부"].fillna(False).astype(bool)
-    else:
-        df_target["공휴일여부"] = False
-        df_target["명절여부"] = False
 
-    df_target["is_holiday"] = df_target["공휴일여부"] | df_target["명절여부"]
-    df_target["is_weekend"] = (df_target["weekday_idx"] >= 5) | df_target["is_holiday"]
-    df_target["is_weekday1"] = (~df_target["is_weekend"]) & (df_target["weekday_idx"].isin([0, 4]))
-    df_target["is_weekday2"] = (~df_target["is_weekend"]) & (df_target["weekday_idx"].isin([1, 2, 3]))
+def _classify_day(df_target: pd.DataFrame, df_cal: pd.DataFrame | None) -> pd.DataFrame:
+    df = df_target.copy()
+    df["공휴일여부"] = False
+    df["명절여부"] = False
 
-    weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
-    df_target["요일"] = df_target["weekday_idx"].map(lambda i: weekday_names[i])
+    if df_cal is not None and not df_cal.empty:
+        df = df.merge(df_cal, on="일자", how="left", suffixes=("", "_cal"))
+        for col in ["공휴일여부", "명절여부"]:
+            if f"{col}_cal" in df.columns:
+                df[col] = df[f"{col}_cal"].fillna(False).astype(bool)
+                df = df.drop(columns=[f"{col}_cal"])
 
-    df_target["nth_dow"] = df_target.sort_values("일").groupby("weekday_idx").cumcount() + 1
+    # 구분: 주말/공휴일, 평일1(월·금), 평일2(화·수·목)
+    df["is_weekend"] = df["요일번호"].isin([5, 6])
+    df["is_holiday"] = df["공휴일여부"] | df["명절여부"]
+    df["is_weekday1"] = df["요일번호"].isin([0, 4])  # 월/금
 
-    def _label(row):
-        if row["is_weekend"]:
-            return "주말/공휴일"
-        if row["is_weekday1"]:
-            return "평일1(월·금)"
-        return "평일2(화·수·목)"
+    df["구분"] = "평일2(화·수·목)"
+    df.loc[df["is_weekday1"], "구분"] = "평일1(월·금)"
+    df.loc[df["is_weekend"] | df["is_holiday"], "구분"] = "주말/공휴일"
+    return df
 
-    df_target["구분"] = df_target.apply(_label, axis=1)
+
+def _recent_years(df_daily: pd.DataFrame, target_year: int, recent_window: int) -> list[int]:
+    years = sorted(df_daily["연도"].dropna().unique().astype(int).tolist())
+    cand = [y for y in years if y < target_year]
+    return cand[-recent_window:] if len(cand) > 0 else []
+
+
+def _prepare_recent_month(df_daily: pd.DataFrame, years: list[int], target_month: int) -> pd.DataFrame:
+    df_recent = df_daily[(df_daily["연도"].isin(years)) & (df_daily["월"] == target_month)].copy()
+    df_recent["요일번호"] = df_recent["일자"].dt.weekday
+    df_recent["weekday_idx"] = df_recent.groupby(["연도", "월", "요일번호"]).cumcount() + 1
+    df_recent["nth_dow"] = df_recent["weekday_idx"].astype(str) + "째 " + df_recent["요일번호"].map(
+        {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
+    )
+    return df_recent
+
+
+def _compute_ratios(df_recent: pd.DataFrame, df_target: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, list[int]]:
+    used_years = sorted(df_recent["연도"].dropna().unique().astype(int).tolist())
+
+    # 과거 데이터에서 "주말/공휴일 / 평일1 / 평일2" 구분해 ratio 추출
+    # - 주말/공휴일: dow 기반 평균
+    # - 평일1/2: nth_dow 기반 (없으면 dow 기반 fallback)
+    df_recent = df_recent.copy()
+    df_recent["is_weekend"] = df_recent["요일번호"].isin([5, 6])
+
+    # 과거 달력(공휴일/명절) 컬럼은 df_daily에 없으므로 주말만 일단 잡고,
+    # target에서는 effective_calendar로 공휴일/명절 포함해서 주말/공휴일 구분
+    df_recent["구분"] = "평일2(화·수·목)"
+    df_recent["is_weekday1"] = df_recent["요일번호"].isin([0, 4])
+    df_recent.loc[df_recent["is_weekday1"], "구분"] = "평일1(월·금)"
+    df_recent.loc[df_recent["is_weekend"], "구분"] = "주말/공휴일"
+
+    # ratio 계산용 raw=공급량(MJ)
+    grp = df_recent.groupby(["구분", "nth_dow"], as_index=False)["공급량(MJ)"].mean()
+    ratio_w1_group = grp[grp["구분"] == "평일1(월·금)"].copy()
+    ratio_w2_group = grp[grp["구분"] == "평일2(화·수·목)"].copy()
+
+    # dow fallback
+    grp_dow = df_recent.groupby(["구분", "요일번호"], as_index=False)["공급량(MJ)"].mean()
+    ratio_w1_by_dow = grp_dow[grp_dow["구분"] == "평일1(월·금)"].copy()
+    ratio_w2_by_dow = grp_dow[grp_dow["구분"] == "평일2(화·수·목)"].copy()
+    ratio_weekend_by_dow = grp_dow[grp_dow["구분"] == "주말/공휴일"].copy()
+
+    ratio_w1_group_dict = dict(zip(ratio_w1_group["nth_dow"], ratio_w1_group["공급량(MJ)"]))
+    ratio_w2_group_dict = dict(zip(ratio_w2_group["nth_dow"], ratio_w2_group["공급량(MJ)"]))
+    ratio_w1_by_dow_dict = dict(zip(ratio_w1_by_dow["요일번호"], ratio_w1_by_dow["공급량(MJ)"]))
+    ratio_w2_by_dow_dict = dict(zip(ratio_w2_by_dow["요일번호"], ratio_w2_by_dow["공급량(MJ)"]))
+    ratio_weekend_by_dow_dict = dict(zip(ratio_weekend_by_dow["요일번호"], ratio_weekend_by_dow["공급량(MJ)"]))
+
+    df_target = df_target.copy()
+    df_target["raw"] = np.nan
 
     def _pick_ratio(row):
-        dow = int(row["weekday_idx"])
-        nth = int(row["nth_dow"])
-        key = (dow, nth)
+        key = row["nth_dow"]
+        dow = row["요일번호"]
 
-        if bool(row["is_weekend"]):
-            v = ratio_weekend_group_dict.get(key, None)
+        if row["구분"] == "주말/공휴일":
+            v = ratio_weekend_by_dow_dict.get(dow, None)
             if v is None or pd.isna(v):
                 v = ratio_weekend_by_dow_dict.get(dow, None)
             return v
@@ -403,11 +321,31 @@ def make_daily_plan_table(
         df_target["raw"] = 1.0
 
     raw_sum = df_target["raw"].sum()
-    df_target["일별비율"] = (df_target["raw"] / raw_sum) if raw_sum > 0 else (1.0 / last_day)
+    df_target["일별비율"] = (df_target["raw"] / raw_sum) if raw_sum > 0 else (1.0 / df_target["일"].max())
+
+    return df_target, df_recent, used_years
+
+
+def make_daily_plan_table(
+    df_daily: pd.DataFrame,
+    df_plan: pd.DataFrame,
+    target_year: int,
+    target_month: int,
+    recent_window: int,
+    plan_col: str,
+    df_cal: pd.DataFrame | None = None,
+):
+    df_target_base = _make_target_calendar(target_year, target_month)
+    df_target = _classify_day(df_target_base, df_cal)
+
+    cand_years = _recent_years(df_daily, target_year, recent_window)
+    df_recent = _prepare_recent_month(df_daily, cand_years, target_month)
+
+    df_target, df_recent, used_years = _compute_ratios(df_recent, df_target)
 
     month_total_all = df_recent["공급량(MJ)"].sum()
     df_target["최근N년_총공급량(MJ)"] = df_target["일별비율"] * month_total_all
-    df_target["최근N년_평균공급량(MJ)"] = df_target["최근N년_총공급량(MJ)"] / len(used_years)
+    df_target["최근N년_평균공급량(MJ)"] = df_target["최근N년_총공급량(MJ)"] / len(used_years) if len(used_years) > 0 else np.nan
 
     row_plan = df_plan[(df_plan["연"] == target_year) & (df_plan["월"] == target_month)]
     plan_total = float(row_plan[plan_col].iloc[0]) if not row_plan.empty else np.nan
@@ -436,94 +374,54 @@ def make_daily_plan_table(
     df_mat = (
         df_recent.pivot_table(index="일", columns="연도", values="공급량(MJ)", aggfunc="sum")
         .sort_index()
-        .sort_index(axis=1)
+        .copy()
     )
 
-    df_debug_target = df_target[
-        ["일", "일자", "요일", "weekday_idx", "nth_dow", "공휴일여부", "명절여부", "is_weekend", "구분", "raw", "일별비율"]
+    df_debug = df_target[
+        [
+            "일자",
+            "요일",
+            "요일번호",
+            "weekday_idx",
+            "nth_dow",
+            "구분",
+            "is_weekend",
+            "is_holiday",
+            "is_weekday1",
+            "raw",
+            "일별비율",
+        ]
     ].copy()
 
-    return df_result, df_mat, used_years, df_debug_target
+    return df_result, df_mat, df_debug, used_years, plan_total
 
 
-def _build_year_daily_plan(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target_year: int, recent_window: int):
-    cal_df = load_effective_calendar()
-    plan_col = _find_plan_col(df_plan)
-
-    all_rows = []
+def _build_year_daily_plan(
+    df_daily: pd.DataFrame,
+    df_plan: pd.DataFrame,
+    target_year: int,
+    recent_window: int,
+):
+    df_cal = load_effective_calendar()
+    plan_col = "사업계획(월별계획)"
+    out_all = []
     month_summary_rows = []
 
     for m in range(1, 13):
-        df_res, _, used_years, _debug = make_daily_plan_table(
+        df_result, _, _, used_years, plan_total = make_daily_plan_table(
             df_daily=df_daily,
             df_plan=df_plan,
             target_year=target_year,
             target_month=m,
             recent_window=recent_window,
+            plan_col=plan_col,
+            df_cal=df_cal,
         )
+        out_all.append(df_result)
+        month_summary_rows.append({"연": target_year, "월": m, "월간 계획(MJ)": plan_total})
 
-        row_plan = df_plan[(df_plan["연"] == target_year) & (df_plan["월"] == m)]
-        plan_total = float(row_plan[plan_col].iloc[0]) if not row_plan.empty else np.nan
-
-        if df_res is None:
-            last_day = calendar.monthrange(target_year, m)[1]
-            dr = pd.date_range(f"{target_year}-{m:02d}-01", periods=last_day, freq="D")
-            tmp = pd.DataFrame({"일자": dr})
-            tmp["연"] = target_year
-            tmp["월"] = m
-            tmp["일"] = tmp["일자"].dt.day
-            tmp["weekday_idx"] = tmp["일자"].dt.weekday
-            weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
-            tmp["요일"] = tmp["weekday_idx"].map(lambda i: weekday_names[i])
-            tmp["nth_dow"] = tmp.groupby("weekday_idx").cumcount() + 1
-
-            if cal_df is not None:
-                tmp = tmp.merge(cal_df, on="일자", how="left")
-                if ("공휴일여부" not in tmp.columns) and ("공휴일여버" in tmp.columns):
-                    tmp = tmp.rename(columns={"공휴일여버": "공휴일여부"})
-                if "공휴일여부" not in tmp.columns:
-                    tmp["공휴일여부"] = False
-                tmp["공휴일여부"] = tmp["공휴일여부"].fillna(False).astype(bool)
-                tmp["명절여부"] = tmp["명절여부"].fillna(False).astype(bool)
-            else:
-                tmp["공휴일여부"] = False
-                tmp["명절여부"] = False
-
-            tmp["is_holiday"] = tmp["공휴일여부"] | tmp["명절여부"]
-            tmp["is_weekend"] = (tmp["weekday_idx"] >= 5) | tmp["is_holiday"]
-            tmp["구분"] = np.where(
-                tmp["is_weekend"], "주말/공휴일",
-                np.where(tmp["weekday_idx"].isin([0, 4]), "평일1(월·금)", "평일2(화·수·목)")
-            )
-
-            tmp["일별비율"] = 1.0 / last_day if last_day > 0 else 0.0
-            tmp["최근N년_총공급량(MJ)"] = np.nan
-            tmp["최근N년_평균공급량(MJ)"] = np.nan
-            tmp["예상공급량(MJ)"] = (tmp["일별비율"] * plan_total).round(0) if pd.notna(plan_total) else np.nan
-
-            df_res = tmp[
-                [
-                    "연",
-                    "월",
-                    "일",
-                    "일자",
-                    "요일",
-                    "weekday_idx",
-                    "nth_dow",
-                    "구분",
-                    "공휴일여부",
-                    "최근N년_평균공급량(MJ)",
-                    "최근N년_총공급량(MJ)",
-                    "일별비율",
-                    "예상공급량(MJ)",
-                ]
-            ].copy()
-
-        all_rows.append(df_res)
-        month_summary_rows.append({"월": m, "월간 계획(MJ)": plan_total})
-
-    df_year = pd.concat(all_rows, ignore_index=True)
-    df_year = df_year.sort_values(["월", "일"]).reset_index(drop=True)
+    df_year = pd.concat(out_all, ignore_index=True)
+    df_month_sum = pd.DataFrame(month_summary_rows)
 
     total_row = {
         "연": "",
@@ -535,112 +433,61 @@ def _build_year_daily_plan(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target
         "nth_dow": "",
         "구분": "",
         "공휴일여부": False,
-        "최근N년_평균공급량(MJ)": df_year["최근N년_평균공급량(MJ)"].sum(skipna=True),
-        "최근N년_총공급량(MJ)": df_year["최근N년_총공급량(MJ)"].sum(skipna=True),
-        "일별비율": df_year["일별비율"].sum(skipna=True),
-        "예상공급량(MJ)": df_year["예상공급량(MJ)"].sum(skipna=True),
+        "최근N년_평균공급량(MJ)": df_year["최근N년_평균공급량(MJ)"].sum(),
+        "최근N년_총공급량(MJ)": df_year["최근N년_총공급량(MJ)"].sum(),
+        "일별비율": df_year["일별비율"].sum(),
+        "예상공급량(MJ)": df_year["예상공급량(MJ)"].sum(),
     }
     df_year_with_total = pd.concat([df_year, pd.DataFrame([total_row])], ignore_index=True)
-
-    df_month_sum = pd.DataFrame(month_summary_rows).sort_values("월").reset_index(drop=True)
-    df_month_sum_total = pd.DataFrame([{"월": "연간합계", "월간 계획(MJ)": df_month_sum["월간 계획(MJ)"].sum(skipna=True)}])
-    df_month_sum = pd.concat([df_month_sum, df_month_sum_total], ignore_index=True)
 
     return df_year_with_total, df_month_sum
 
 
-# ─────────────────────────────────────────────
-# 탭1: Daily 공급량 분석
-# ─────────────────────────────────────────────
 def tab_daily_plan(df_daily: pd.DataFrame):
-    st.subheader("📅 Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획")
-
     df_plan = load_monthly_plan()
-    plan_col = _find_plan_col(df_plan)
+    df_cal = load_effective_calendar()
 
-    years_plan = sorted(df_plan["연"].unique())
-    default_year_idx = years_plan.index(2026) if 2026 in years_plan else len(years_plan) - 1
+    st.sidebar.markdown("### ✅ Daily 공급량 계획 설정")
+    years = sorted(df_plan["연"].dropna().unique().astype(int).tolist())
+    if 2025 in years:
+        default_year = 2025
+    else:
+        default_year = years[-1] if years else 2025
 
-    col_y, col_m, _ = st.columns([1, 1, 2])
-    with col_y:
-        target_year = st.selectbox("계획 연도 선택", years_plan, index=default_year_idx)
-    with col_m:
-        months_plan = sorted(df_plan[df_plan["연"] == target_year]["월"].unique())
-        default_month_idx = months_plan.index(1) if 1 in months_plan else 0
-        target_month = st.selectbox("계획 월 선택", months_plan, index=default_month_idx, format_func=lambda m: f"{m}월")
+    target_year = st.sidebar.selectbox("계획 연도 선택", years if years else [default_year], index=(years.index(default_year) if years and default_year in years else 0))
 
-    all_years = sorted(df_daily["연도"].unique())
-    hist_years = [y for y in all_years if y < target_year]
-    if len(hist_years) < 1:
-        st.warning("해당 연도는 직전 연도가 없어 최근 N년 분석을 할 수 없어.")
-        return
+    months = list(range(1, 13))
+    target_month = st.sidebar.selectbox("계획 월 선택", months, index=0)
 
-    slider_min = 1
-    slider_max = min(10, len(hist_years))
+    recent_window = st.sidebar.slider("최근 N년 후보(최대 몇 년 전까지)", min_value=2, max_value=6, value=3, step=1)
+    plan_col = "사업계획(월별계획)"
 
-    col_slider, _ = st.columns([2, 3])
-    with col_slider:
-        recent_window = st.slider(
-            "최근 몇 년 평균으로 비율을 계산할까?",
-            min_value=slider_min,
-            max_value=slider_max,
-            value=min(3, slider_max),
-            step=1,
-            help="예: 3년을 선택하면 대상연도 직전 3개 연도의 같은 월 데이터를 사용 (단, 해당월 실적 없는 연도는 자동 제외)",
-        )
+    # 0) 월별 계획표(가로) + 연간 총량
+    st.markdown("### 📌 월별 계획량(1~12월) & 연간 총량")
+    df_plan_h = make_month_plan_horizontal(df_plan=df_plan, target_year=int(target_year), plan_col=plan_col)
+    df_plan_h_disp = format_table_generic(df_plan_h)
+    show_table_no_index(df_plan_h_disp, height=160)
 
-    st.caption(
-        f"최근 {recent_window}년 후보({target_year-recent_window}년 ~ {target_year-1}년) "
-        f"{target_month}월 패턴으로 {target_year}년 {target_month}월 일별 계획을 계산. "
-        "(해당월 실적이 없는 연도는 자동 제외)"
-    )
+    # 1) 대상월 계산
+    st.markdown("### 📍 1. 대상월 일별 비율, 예상 공급량 테이블")
 
-    df_result, df_mat, used_years, df_debug = make_daily_plan_table(
+    df_result, df_mat, df_debug, used_years, plan_total = make_daily_plan_table(
         df_daily=df_daily,
         df_plan=df_plan,
-        target_year=target_year,
-        target_month=target_month,
-        recent_window=recent_window,
+        target_year=int(target_year),
+        target_month=int(target_month),
+        recent_window=int(recent_window),
+        plan_col=plan_col,
+        df_cal=df_cal,
     )
 
-    if df_result is None or len(used_years) == 0:
-        st.warning("해당 연도/월에 대해 선택한 최근 N년 기준으로 계산할 수 있는 데이터가 없어.")
-        return
-
-    st.markdown(f"- 실제 학습에 사용된 연도(해당월 실적 존재): **{min(used_years)}년 ~ {max(used_years)}년 (총 {len(used_years)}개)**")
-
-    row_plan = df_plan[(df_plan["연"] == target_year) & (df_plan["월"] == target_month)]
-    plan_total_raw = float(row_plan[plan_col].iloc[0]) if not row_plan.empty else np.nan
-    plan_total = float(df_result["예상공급량(MJ)"].sum())
+    plan_total_gj = mj_to_gj(plan_total)
+    plan_total_m3 = mj_to_m3(plan_total)
 
     st.markdown(
         f"**{target_year}년 {target_month}월 사업계획 제출 공급량 합계:** "
-        f"`{plan_total:,.0f} MJ`"
+        f"`{plan_total_gj:,.0f} GJ`  /  `{plan_total_m3:,.0f} ㎥`"
     )
-
-    # ★ 요청: 소제목 + 아이콘
-    st.markdown("### 🧩 일별 공급량 분배 기준")
-    st.markdown(
-        """
-본 파일의 메인 시트 '일별비율'은 단순히 '예상공급량/월합계'로 역산한 값이 아니라,  
-최근 N년의 패턴에서 '해당 월 내 각 날짜가 차지하는 비중'을 만든 값임.
-
-- **주말/공휴일/명절**: **'요일(토/일) + 그 달의 n번째' 기준 평균** (공휴일/명절도 주말 패턴으로 묶음)
-- **평일**: '평일1(월·금)' / '평일2(화·수·목)'로 구분하되,  
-  기본은 **'요일 + 그 달의 n번째(1째 월요일, 2째 월요일...)' 기준 평균**
-- 일부 케이스 데이터가 부족하면 **'요일 평균'으로 보정**
-- 마지막에 **일별비율 합계가 1이 되도록 정규화(raw / SUM(raw))**
-        """.strip()
-    )
-
-    # ★ 요청: 월별 계획 표 (인덱스 제거 + 가로버전)
-    st.markdown("#### 📌 월별 계획량(1~12월) & 연간 총량")
-    df_plan_h = make_month_plan_horizontal(df_plan, target_year=int(target_year), plan_col=plan_col)
-    df_plan_h_disp = format_table_generic(df_plan_h)
-    show_table_no_index(df_plan_h_disp, height=120)
-
-    # 1) 일별 테이블
-    st.markdown("#### 📋 1. 일별 비율, 예상 공급량 테이블")
 
     view = df_result.copy()
     total_row = {
@@ -665,7 +512,27 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             "연", "월", "일", "요일", "weekday_idx", "nth_dow", "구분", "공휴일여부",
             "최근N년_평균공급량(MJ)", "최근N년_총공급량(MJ)", "일별비율", "예상공급량(MJ)"
         ]
+    ].copy()
+
+    # MJ → GJ + ㎥ 변환 (표시용)
+    view_for_format = add_gj_m3_columns(
+        view_for_format,
+        mj_cols=["최근N년_평균공급량(MJ)", "최근N년_총공급량(MJ)", "예상공급량(MJ)"],
+        drop_mj=True,
+        round_digits=0,
+    )
+
+    # 보기 좋은 컬럼 순서
+    view_for_format = view_for_format[
+        [
+            "연", "월", "일", "요일", "weekday_idx", "nth_dow", "구분", "공휴일여부",
+            "최근N년_평균공급량(GJ)", "최근N년_평균공급량(㎥)",
+            "최근N년_총공급량(GJ)", "최근N년_총공급량(㎥)",
+            "일별비율",
+            "예상공급량(GJ)", "예상공급량(㎥)",
+        ]
     ]
+
     view_for_format = format_table_generic(view_for_format, percent_cols=["일별비율"])
     show_table_no_index(view_for_format, height=520)
 
@@ -676,14 +543,17 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     # 2) 그래프
     st.markdown("#### 📊 2. 일별 예상 공급량 & 비율 그래프(평일1/평일2/주말 분리)")
 
-    w1_df = view[view["구분"] == "평일1(월·금)"]
-    w2_df = view[view["구분"] == "평일2(화·수·목)"]
-    wend_df = view[view["구분"] == "주말/공휴일"]
+    view_plot = view.copy()
+    view_plot["예상공급량(GJ)"] = mj_to_gj(view_plot["예상공급량(MJ)"].astype("float64")).round(0)
+
+    w1_df = view_plot[view_plot["구분"] == "평일1(월·금)"]
+    w2_df = view_plot[view_plot["구분"] == "평일2(화·수·목)"]
+    wend_df = view_plot[view_plot["구분"] == "주말/공휴일"]
 
     fig = go.Figure()
-    fig.add_bar(x=w1_df["일"], y=w1_df["예상공급량(MJ)"], name="평일1(월·금) 예상공급량(MJ)")
-    fig.add_bar(x=w2_df["일"], y=w2_df["예상공급량(MJ)"], name="평일2(화·수·목) 예상공급량(MJ)")
-    fig.add_bar(x=wend_df["일"], y=wend_df["예상공급량(MJ)"], name="주말/공휴일 예상공급량(MJ)")
+    fig.add_bar(x=w1_df["일"], y=w1_df["예상공급량(GJ)"], name="평일1(월·금) 예상공급량(GJ)")
+    fig.add_bar(x=w2_df["일"], y=w2_df["예상공급량(GJ)"], name="평일2(화·수·목) 예상공급량(GJ)")
+    fig.add_bar(x=wend_df["일"], y=wend_df["예상공급량(GJ)"], name="주말/공휴일 예상공급량(GJ)")
     fig.add_trace(
         go.Scatter(
             x=view["일"],
@@ -700,7 +570,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             f"(최근{recent_window}년 후보 중 실제 사용 {len(used_years)}년, {target_month}월 패턴 기반)"
         ),
         xaxis_title="일",
-        yaxis=dict(title="예상 공급량 (MJ)"),
+        yaxis=dict(title="예상 공급량 (GJ)"),
         yaxis2=dict(title="일별비율", overlaying="y", side="right"),
         barmode="group",
         margin=dict(l=20, r=20, t=60, b=40),
@@ -708,81 +578,94 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     st.plotly_chart(fig, use_container_width=True)
 
     # 3) 매트릭스(Heatmap)
-    st.markdown("#### 🧊 3. 최근 N년 일별 실적 매트릭스")
-
-    if df_mat is not None:
+    st.markdown("#### 🧊 3. (참고) 과거 N년 일별 공급량 매트릭스 (Heatmap)")
+    if df_mat.empty:
+        st.info("최근 N년 데이터가 부족하여 매트릭스를 표시할 수 없어.")
+    else:
         fig_hm = go.Figure(
             data=go.Heatmap(
-                z=df_mat.values,
+                z=mj_to_gj(df_mat.values.astype("float64")),
                 x=[str(c) for c in df_mat.columns],
-                y=df_mat.index,
-                colorbar_title="공급량(MJ)",
-                colorscale="RdBu_r",
+                y=[str(i) for i in df_mat.index],
+                colorbar_title="공급량(GJ)",
             )
         )
         fig_hm.update_layout(
-            title=f"최근 {len(used_years)}년 {target_month}월 일별 실적 공급량(MJ) 매트릭스",
-            xaxis=dict(title="연도", type="category"),
-            yaxis=dict(title="일", autorange="reversed"),
-            margin=dict(l=40, r=40, t=60, b=40),
+            title=f"최근 {len(used_years)}년 {target_month}월 일별 실적 공급량(GJ) 매트릭스",
+            xaxis_title="연도",
+            yaxis_title="일",
+            height=420,
         )
-        st.plotly_chart(fig_hm, use_container_width=False)
+        st.plotly_chart(fig_hm, use_container_width=True)
 
-    # 4) 구분별 비중 요약
+    # 4) 구분별 요약
     st.markdown("#### 🧾 4. 구분별 비중 요약(평일1/평일2/주말)")
 
     summary = (
-        view.groupby("구분", as_index=False)[["일별비율", "예상공급량(MJ)"]]
+        view_plot.groupby("구분", as_index=False)[["일별비율", "예상공급량(GJ)"]]
         .sum()
         .rename(columns={"일별비율": "일별비율합계"})
     )
+    # GJ→㎥ 환산은 (GJ*1000)/42.563
+    summary["예상공급량(㎥)"] = mj_to_m3((summary["예상공급량(GJ)"] * 1000.0).astype("float64")).round(0)
+
     total_row_sum = {
         "구분": "합계",
         "일별비율합계": summary["일별비율합계"].sum(),
-        "예상공급량(MJ)": summary["예상공급량(MJ)"].sum(),
+        "예상공급량(GJ)": summary["예상공급량(GJ)"].sum(),
+        "예상공급량(㎥)": summary["예상공급량(㎥)"].sum(),
     }
     summary = pd.concat([summary, pd.DataFrame([total_row_sum])], ignore_index=True)
     summary = format_table_generic(summary, percent_cols=["일별비율합계"])
     show_table_no_index(summary, height=220)
 
-    # 5) 엑셀 다운로드(월 단위)
-    st.markdown("#### 💾 5. 일별 계획 엑셀 다운로드")
-
+    # 5) 월별 다운로드(대상월)
+    st.markdown("#### ⬇️ 5. 일일계획 다운로드(월별)")
     buffer = BytesIO()
-    sheet_name = f"{target_year}_{target_month:02d}_일별계획"
-
+    sheet_name = f"{target_year}-{target_month:02d}"
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        view_with_total.to_excel(writer, index=False, sheet_name=sheet_name)
+        df_excel = view_with_total.copy()
+        df_excel = add_gj_m3_columns(
+            df_excel,
+            mj_cols=["최근N년_평균공급량(MJ)", "최근N년_총공급량(MJ)", "예상공급량(MJ)"],
+            drop_mj=True,
+            round_digits=0,
+        )
+        df_excel.to_excel(writer, index=False, sheet_name=sheet_name)
+
         wb = writer.book
         ws = wb[sheet_name]
 
-        # 헤더 bold
-        for c in range(1, ws.max_column + 1):
-            ws.cell(1, c).font = Font(bold=True)
+        header_font = Font(bold=True)
+        center = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-        ws.freeze_panes = "A2"
-        for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+        for cell in ws[1]:
+            cell.font = header_font
+            cell.alignment = center
+
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
             for cell in row:
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.alignment = center
+
+        for col in ws.columns:
+            max_len = 0
+            col_letter = col[0].column_letter
+            for cell in col:
+                val = "" if cell.value is None else str(cell.value)
+                if len(val) > max_len:
+                    max_len = len(val)
+            ws.column_dimensions[col_letter].width = min(max(10, max_len + 2), 24)
 
     st.download_button(
-        label=f"📥 {target_year}년 {target_month}월 일별공급계획 다운로드 (Excel)",
+        label="📥 엑셀 다운로드(월별)",
         data=buffer.getvalue(),
-        file_name=f"{target_year}_{target_month:02d}_일별공급계획.xlsx",
+        file_name=f"일별계획_{target_year}_{target_month:02d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # 6) 연간 다운로드(기존 유지)
-    st.markdown("#### 🗂️ 6. 일일계획 다운로드(연간)")
-
-    years_plan = sorted(df_plan["연"].unique())
-    annual_year = st.selectbox(
-        "연간 계획 연도 선택",
-        years_plan,
-        index=years_plan.index(target_year) if target_year in years_plan else 0,
-        key="annual_year_select",
-    )
-
+    # 6) 연간 다운로드
+    st.markdown("#### ⬇️ 6. 일일계획 다운로드(연간)")
+    annual_year = st.selectbox("연간 다운로드 연도 선택", years if years else [default_year], index=(years.index(default_year) if years and default_year in years else 0), key="annual_year")
     buffer_year = BytesIO()
     df_year_daily, df_month_summary = _build_year_daily_plan(
         df_daily=df_daily,
@@ -792,103 +675,112 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     )
 
     with pd.ExcelWriter(buffer_year, engine="openpyxl") as writer:
-        df_year_daily.to_excel(writer, index=False, sheet_name="연간")
-        df_month_summary.to_excel(writer, index=False, sheet_name="월 요약 계획")
+        df_year_excel = add_gj_m3_columns(
+            df_year_daily,
+            mj_cols=["최근N년_평균공급량(MJ)", "최근N년_총공급량(MJ)", "예상공급량(MJ)"],
+            drop_mj=True,
+            round_digits=0,
+        )
+        df_year_excel.to_excel(writer, index=False, sheet_name="연간")
+
+        df_month_excel = df_month_summary.copy()
+        if "월간 계획(MJ)" in df_month_excel.columns:
+            df_month_excel = add_gj_m3_columns(
+                df_month_excel,
+                mj_cols=["월간 계획(MJ)"],
+                drop_mj=True,
+                round_digits=0,
+            )
+        df_month_excel.to_excel(writer, index=False, sheet_name="월 요약 계획")
 
         wb = writer.book
-        ws_y = wb["연간"]
-        ws_m = wb["월 요약 계획"]
 
-        _format_excel_sheet(ws_y, freeze="A2", center=True)
-        _format_excel_sheet(ws_m, freeze="A2", center=True)
+        for sheet in ["연간", "월 요약 계획"]:
+            ws = wb[sheet]
+            header_font = Font(bold=True)
+            center = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-        for c in range(1, ws_y.max_column + 1):
-            ws_y.cell(1, c).font = Font(bold=True)
-        for c in range(1, ws_m.max_column + 1):
-            ws_m.cell(1, c).font = Font(bold=True)
+            for cell in ws[1]:
+                cell.font = header_font
+                cell.alignment = center
+
+            for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+                for cell in row:
+                    cell.alignment = center
+
+            for col in ws.columns:
+                max_len = 0
+                col_letter = col[0].column_letter
+                for cell in col:
+                    val = "" if cell.value is None else str(cell.value)
+                    max_len = max(max_len, len(val))
+                ws.column_dimensions[col_letter].width = min(max(10, max_len + 2), 24)
 
     st.download_button(
-        label=f"📥 {annual_year}년 연간 일별공급계획 다운로드 (Excel)",
+        label="📥 엑셀 다운로드(연간)",
         data=buffer_year.getvalue(),
-        file_name=f"{annual_year}_연간_일별공급계획.xlsx",
+        file_name=f"일별계획_{annual_year}_연간.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="download_annual_excel",
     )
 
 
 # ─────────────────────────────────────────────
-# 탭2: Daily·Monthly 공급량 비교
+# Daily·Monthly 비교(기온 기반 예측 검증)
 # ─────────────────────────────────────────────
+def fit_poly3_and_r2(x: pd.Series, y: pd.Series):
+    x = x.astype("float64")
+    y = y.astype("float64")
+    mask = x.notna() & y.notna()
+    x = x[mask]
+    y = y[mask]
+    if len(x) < 6:
+        return None, None, None
+    coef = np.polyfit(x, y, 3)
+    p = np.poly1d(coef)
+    y_pred = p(x)
+    ss_res = np.sum((y - y_pred) ** 2)
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot != 0 else np.nan
+    return coef, y_pred, r2
+
+
+def plot_poly_fit(x, y, coef, title, x_label, y_label):
+    p = np.poly1d(coef)
+    x_line = np.linspace(np.nanmin(x), np.nanmax(x), 200)
+    y_line = p(x_line)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x, y=y, mode="markers", name="실제"))
+    fig.add_trace(go.Scatter(x=x_line, y=y_line, mode="lines", name="3차 회귀"))
+    fig.update_layout(title=title, xaxis_title=x_label, yaxis_title=y_label, height=420, margin=dict(l=20, r=20, t=60, b=40))
+    return fig
+
+
 def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
-    min_year_model = int(df["연도"].min())
-    max_year_model = int(df["연도"].max())
+    st.sidebar.markdown("### ✅ 비교 설정")
 
-    st.subheader("📊 0. 상관도 분석 (공급량 vs 주요 변수)")
+    min_year = int(df["연도"].min())
+    max_year = int(df["연도"].max())
+    start_year = st.sidebar.number_input("학습 시작 연도", min_value=min_year, max_value=max_year, value=min_year, step=1)
+    end_year = st.sidebar.number_input("학습 종료 연도", min_value=min_year, max_value=max_year, value=max_year, step=1)
 
-    df_corr_raw = load_corr_data()
-    if df_corr_raw is None:
-        st.caption("상관도분석.xlsx 파일이 없어서 상관도 매트릭스를 표시하지 못했어.")
-    else:
-        num_df = df_corr_raw.select_dtypes(include=["number"]).copy()
-        num_cols = list(num_df.columns)
+    df_window = df[(df["연도"] >= start_year) & (df["연도"] <= end_year)].copy()
 
-        if len(num_cols) >= 2:
-            corr = num_df.corr()
-            z = np.clip(corr.values, -0.7, 0.7)
-            text = corr.round(2).astype(str).values
-
-            fig_corr = go.Figure(
-                data=go.Heatmap(
-                    z=z,
-                    x=corr.columns,
-                    y=corr.index,
-                    zmin=-0.7,
-                    zmax=0.7,
-                    zmid=0,
-                    colorbar_title="상관계수",
-                    text=text,
-                    texttemplate="%{text}",
-                    textfont=dict(size=10, color="black"),
-                )
-            )
-            fig_corr.update_layout(
-                xaxis_title="변수",
-                yaxis_title="변수",
-                xaxis=dict(side="top", tickangle=45),
-                yaxis=dict(autorange="reversed"),
-                width=600,
-                height=600,
-                margin=dict(l=80, r=20, t=80, b=80),
-            )
-            st.plotly_chart(fig_corr, use_container_width=True)
-        else:
-            st.caption("숫자 컬럼이 2개 미만이라 상관도 분석을 할 수 없어.")
-
-    st.subheader("📚 ① 데이터 학습기간 선택 (3차 다항식 R² 계산용)")
-
-    train_default_start = max(min_year_model, max_year_model - 4)
-    train_start, train_end = st.slider(
-        "학습에 사용할 연도 범위",
-        min_value=min_year_model,
-        max_value=max_year_model,
-        value=(train_default_start, max_year_model),
-        step=1,
-    )
-
-    st.caption(f"현재 학습 구간: **{train_start}년 ~ {train_end}년**")
-    df_window = df[df["연도"].between(train_start, train_end)].copy()
+    st.markdown("### 📈 기온–공급량 관계(일/월) 3차 회귀 + R² 비교")
 
     df_month = (
         df_window
         .groupby(["연도", "월"], as_index=False)
         .agg(공급량_MJ=("공급량(MJ)", "sum"), 평균기온=("평균기온(℃)", "mean"))
     )
+    df_month["공급량_GJ"] = mj_to_gj(df_month["공급량_MJ"].astype("float64"))
 
-    coef_m, y_pred_m, r2_m = fit_poly3_and_r2(df_month["평균기온"], df_month["공급량_MJ"])
-    df_month["예측공급량_MJ"] = y_pred_m if y_pred_m is not None else np.nan
+    coef_m, y_pred_m, r2_m = fit_poly3_and_r2(df_month["평균기온"], df_month["공급량_GJ"])
+    df_month["예측공급량_GJ"] = y_pred_m if y_pred_m is not None else np.nan
 
-    coef_d, y_pred_d, r2_d = fit_poly3_and_r2(df_window["평균기온(℃)"], df_window["공급량(MJ)"])
-    df_window["예측공급량_MJ"] = y_pred_d if y_pred_d is not None else np.nan
+    df_window["공급량_GJ"] = mj_to_gj(df_window["공급량(MJ)"].astype("float64"))
+    coef_d, y_pred_d, r2_d = fit_poly3_and_r2(df_window["평균기온(℃)"], df_window["공급량_GJ"])
+    df_window["예측공급량_GJ"] = y_pred_d if y_pred_d is not None else np.nan
 
     st.markdown("##### 월평균 vs 일평균 기온 기반 R² 비교 (학습기간 기준)")
     col1, col2 = st.columns(2)
@@ -898,7 +790,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
             st.metric("R² (월평균 기온 사용)", f"{r2_m:.3f}")
             st.caption(f"사용 월 수: {len(df_month)}")
         else:
-            st.write("월 단위 회귀에 필요한 데이터가 부족해.")
+            st.warning("월 단위 모델 계산에 필요한 데이터가 부족해.")
 
     with col2:
         st.markdown("**일 단위 모델 (일평균 기온 → 일별 공급량)**")
@@ -906,27 +798,63 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
             st.metric("R² (일평균 기온 사용)", f"{r2_d:.3f}")
             st.caption(f"사용 일 수: {len(df_window)}")
         else:
-            st.write("일 단위 회귀에 필요한 데이터가 부족해.")
+            st.warning("일 단위 모델 계산에 필요한 데이터가 부족해.")
 
-    st.subheader("📈 기온–공급량 관계 (실적 vs 3차 다항식 곡선)")
+    st.markdown("---")
+    st.markdown("### 🔍 산점도 + 회귀곡선 (월/일)")
+
+    col3 = st.columns(2)
+    col3 = col3[0]
+    col4 = st.columns(2)
+    col4 = col4[1]
+
     col3, col4 = st.columns(2)
     with col3:
         if coef_m is not None:
             fig_m = plot_poly_fit(
-                df_month["평균기온"], df_month["공급량_MJ"], coef_m,
-                title="월단위: 월평균 기온 vs 월별 공급량(MJ)",
-                x_label="월평균 기온 (℃)", y_label="월별 공급량 합계 (MJ)"
+                df_month["평균기온"], df_month["공급량_GJ"], coef_m,
+                title="월단위: 월평균 기온 vs 월별 공급량(GJ)",
+                x_label="월평균 기온 (℃)", y_label="월별 공급량 합계 (GJ)"
             )
             st.plotly_chart(fig_m, use_container_width=True)
 
     with col4:
         if coef_d is not None:
             fig_d = plot_poly_fit(
-                df_window["평균기온(℃)"], df_window["공급량(MJ)"], coef_d,
-                title="일단위: 일평균 기온 vs 일별 공급량(MJ)",
-                x_label="일평균 기온 (℃)", y_label="일별 공급량 (MJ)"
+                df_window["평균기온(℃)"], df_window["공급량_GJ"], coef_d,
+                title="일단위: 일평균 기온 vs 일별 공급량(GJ)",
+                x_label="일평균 기온 (℃)", y_label="일별 공급량 (GJ)"
             )
             st.plotly_chart(fig_d, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("### 📌 상관도 분석(옵션)")
+
+    df_corr = load_corr_data()
+    if df_corr is None:
+        st.info("상관도분석.xlsx 파일이 없어서 상관도 분석 탭은 생략했어.")
+        return
+
+    cols = df_corr.columns.tolist()
+    numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df_corr[c])]
+    if len(numeric_cols) < 2:
+        st.info("상관계수 계산을 위한 수치형 컬럼이 부족해.")
+        return
+
+    corr = df_corr[numeric_cols].corr()
+
+    fig_corr = go.Figure(
+        data=go.Heatmap(
+            z=corr.values,
+            x=corr.columns,
+            y=corr.index,
+            colorbar_title="상관계수",
+            zmin=-1,
+            zmax=1,
+        )
+    )
+    fig_corr.update_layout(title="수치형 컬럼 상관계수 Heatmap", height=520, margin=dict(l=20, r=20, t=60, b=40))
+    st.plotly_chart(fig_corr, use_container_width=True)
 
 
 # ─────────────────────────────────────────────
