@@ -203,15 +203,12 @@ def _find_plan_col(df_plan: pd.DataFrame) -> str:
 
 def make_month_plan_horizontal(df_plan: pd.DataFrame, target_year: int, plan_col: str) -> pd.DataFrame:
     """
-    월별 계획 표(가로 1행) + 하단(2행)에 ㎥(N㎥) 환산 행 추가
-    - 표시 단위: GJ
-    - 환산: 42.563 MJ/N㎥
+    월별 계획 표(가로) : 1행=GJ, 2행=㎥
     """
     df_year = df_plan[df_plan["연"] == target_year][["월", plan_col]].copy()
     base = pd.DataFrame({"월": list(range(1, 13))})
     df_year = base.merge(df_year, on="월", how="left")
 
-    # 원자료는 MJ라고 보고 변환
     df_year["월별 계획(GJ)"] = mj_to_gj(df_year[plan_col])
     df_year["월별 계획(㎥)"] = mj_to_nm3(df_year[plan_col])
 
@@ -239,9 +236,9 @@ def _excel_find_col_letter(ws, header_name: str) -> str | None:
 
 def _add_cumulative_plan_sheet(wb, asof_date: dt.date):
     """
-    연간 시트를 기반으로 누적계획량 시트 생성
-    - 기준일(B1) 변경 시 자동 반영 (SUMIFS)
-    - GJ + ㎥ 둘 다 표시
+    누적계획량 시트
+    - 진행률(일대비) = (기준일까지 실적) / (기준일까지 목표)
+    - 일/월/연 모두 같은 방식
     """
     if "연간" not in wb.sheetnames:
         return
@@ -249,12 +246,12 @@ def _add_cumulative_plan_sheet(wb, asof_date: dt.date):
     ws_y = wb["연간"]
 
     date_col = _excel_find_col_letter(ws_y, "일자")
-    gj_col = _excel_find_col_letter(ws_y, "예상공급량(GJ)")
-    m3_col = _excel_find_col_letter(ws_y, "예상공급량(㎥)")
-    year_col = _excel_find_col_letter(ws_y, "연")
-    month_col = _excel_find_col_letter(ws_y, "월")
+    plan_gj_col = _excel_find_col_letter(ws_y, "예상공급량(GJ)")
+    plan_m3_col = _excel_find_col_letter(ws_y, "예상공급량(㎥)")
+    act_gj_col = _excel_find_col_letter(ws_y, "실적공급량(GJ)")
+    act_m3_col = _excel_find_col_letter(ws_y, "실적공급량(㎥)")
 
-    if not all([date_col, gj_col, m3_col, year_col, month_col]):
+    if not all([date_col, plan_gj_col, plan_m3_col, act_gj_col, act_m3_col]):
         return
 
     ws_c = wb.create_sheet("누적계획량")
@@ -264,11 +261,11 @@ def _add_cumulative_plan_sheet(wb, asof_date: dt.date):
     ws_c["B1"].number_format = "yyyy-mm-dd"
 
     ws_c["A3"].value = "구분"
-    ws_c["B3"].value = "목표(GJ)"
-    ws_c["C3"].value = "누적(GJ)"
+    ws_c["B3"].value = "목표(GJ)"   # 기준일까지 목표(=일대비 목표 누적)
+    ws_c["C3"].value = "누적(GJ)"   # 기준일까지 실적(=일대비 실적 누적)
     ws_c["D3"].value = "목표(㎥)"
     ws_c["E3"].value = "누적(㎥)"
-    ws_c["F3"].value = "진행률(GJ)"
+    ws_c["F3"].value = "진행률(일대비, GJ)"
 
     for c in range(1, 7):
         ws_c.cell(3, c).font = Font(bold=True)
@@ -278,38 +275,46 @@ def _add_cumulative_plan_sheet(wb, asof_date: dt.date):
     ws_c["A5"].value = "월"
     ws_c["A6"].value = "연"
 
-    rng_gj = f"연간!${gj_col}:${gj_col}"
-    rng_m3 = f"연간!${m3_col}:${m3_col}"
+    rng_plan_gj = f"연간!${plan_gj_col}:${plan_gj_col}"
+    rng_plan_m3 = f"연간!${plan_m3_col}:${plan_m3_col}"
+    rng_act_gj = f"연간!${act_gj_col}:${act_gj_col}"
+    rng_act_m3 = f"연간!${act_m3_col}:${act_m3_col}"
     rng_date = f"연간!${date_col}:${date_col}"
-    rng_year = f"연간!${year_col}:${year_col}"
-    rng_month = f"연간!${month_col}:${month_col}"
 
-    # 일
-    ws_c["B4"].value = f'=SUMIFS({rng_gj},{rng_date},$B$1)'
-    ws_c["C4"].value = f'=SUMIFS({rng_gj},{rng_date},$B$1)'
-    ws_c["D4"].value = f'=SUMIFS({rng_m3},{rng_date},$B$1)'
-    ws_c["E4"].value = f'=SUMIFS({rng_m3},{rng_date},$B$1)'
+    # ── 일 (해당일 실적 / 해당일 목표)
+    ws_c["B4"].value = f'=SUMIFS({rng_plan_gj},{rng_date},$B$1)'
+    ws_c["C4"].value = f'=SUMIFS({rng_act_gj},{rng_date},$B$1)'
+    ws_c["D4"].value = f'=SUMIFS({rng_plan_m3},{rng_date},$B$1)'
+    ws_c["E4"].value = f'=SUMIFS({rng_act_m3},{rng_date},$B$1)'
     ws_c["F4"].value = "=IFERROR(C4/B4,0)"
 
-    # 월
-    ws_c["B5"].value = f'=SUMIFS({rng_gj},{rng_year},YEAR($B$1),{rng_month},MONTH($B$1))'
-    ws_c["C5"].value = (
-        f'=SUMIFS({rng_gj},{rng_date},"<="&$B$1,{rng_date},">="&DATE(YEAR($B$1),MONTH($B$1),1))'
+    # ── 월 (기준일까지 실적 누적 / 기준일까지 목표 누적)
+    ws_c["B5"].value = (
+        f'=SUMIFS({rng_plan_gj},{rng_date},"<="&$B$1,{rng_date},">="&DATE(YEAR($B$1),MONTH($B$1),1))'
     )
-    ws_c["D5"].value = f'=SUMIFS({rng_m3},{rng_year},YEAR($B$1),{rng_month},MONTH($B$1))'
+    ws_c["C5"].value = (
+        f'=SUMIFS({rng_act_gj},{rng_date},"<="&$B$1,{rng_date},">="&DATE(YEAR($B$1),MONTH($B$1),1))'
+    )
+    ws_c["D5"].value = (
+        f'=SUMIFS({rng_plan_m3},{rng_date},"<="&$B$1,{rng_date},">="&DATE(YEAR($B$1),MONTH($B$1),1))'
+    )
     ws_c["E5"].value = (
-        f'=SUMIFS({rng_m3},{rng_date},"<="&$B$1,{rng_date},">="&DATE(YEAR($B$1),MONTH($B$1),1))'
+        f'=SUMIFS({rng_act_m3},{rng_date},"<="&$B$1,{rng_date},">="&DATE(YEAR($B$1),MONTH($B$1),1))'
     )
     ws_c["F5"].value = "=IFERROR(C5/B5,0)"
 
-    # 연
-    ws_c["B6"].value = f'=SUMIFS({rng_gj},{rng_year},YEAR($B$1))'
-    ws_c["C6"].value = (
-        f'=SUMIFS({rng_gj},{rng_date},"<="&$B$1,{rng_date},">="&DATE(YEAR($B$1),1,1))'
+    # ── 연 (기준일까지 실적 누적 / 기준일까지 목표 누적)
+    ws_c["B6"].value = (
+        f'=SUMIFS({rng_plan_gj},{rng_date},"<="&$B$1,{rng_date},">="&DATE(YEAR($B$1),1,1))'
     )
-    ws_c["D6"].value = f'=SUMIFS({rng_m3},{rng_year},YEAR($B$1))'
+    ws_c["C6"].value = (
+        f'=SUMIFS({rng_act_gj},{rng_date},"<="&$B$1,{rng_date},">="&DATE(YEAR($B$1),1,1))'
+    )
+    ws_c["D6"].value = (
+        f'=SUMIFS({rng_plan_m3},{rng_date},"<="&$B$1,{rng_date},">="&DATE(YEAR($B$1),1,1))'
+    )
     ws_c["E6"].value = (
-        f'=SUMIFS({rng_m3},{rng_date},"<="&$B$1,{rng_date},">="&DATE(YEAR($B$1),1,1))'
+        f'=SUMIFS({rng_act_m3},{rng_date},"<="&$B$1,{rng_date},">="&DATE(YEAR($B$1),1,1))'
     )
     ws_c["F6"].value = "=IFERROR(C6/B6,0)"
 
@@ -319,7 +324,7 @@ def _add_cumulative_plan_sheet(wb, asof_date: dt.date):
     ws_c.column_dimensions["C"].width = 14
     ws_c.column_dimensions["D"].width = 16
     ws_c.column_dimensions["E"].width = 16
-    ws_c.column_dimensions["F"].width = 14
+    ws_c.column_dimensions["F"].width = 18
 
     for r in range(4, 7):
         ws_c[f"A{r}"].alignment = Alignment(horizontal="center", vertical="center")
@@ -390,7 +395,6 @@ def make_daily_plan_table(
     df_recent["month_total"] = df_recent.groupby("연도")["공급량(MJ)"].transform("sum")
     df_recent["ratio"] = df_recent["공급량(MJ)"] / df_recent["month_total"]
 
-    # 같은 연도에서 "그 요일의 n번째"
     df_recent["nth_dow"] = (
         df_recent.sort_values(["연도", "일"])
         .groupby(["연도", "weekday_idx"])
@@ -434,7 +438,7 @@ def make_daily_plan_table(
     ratio_w1_group_dict = ratio_w1_group.to_dict()
     ratio_w1_by_dow_dict = ratio_w1_by_dow.to_dict()
     ratio_w2_group_dict = ratio_w2_group.to_dict()
-    ratio_w2_by_dow_dict = ratio_w2_by_dow.to_dict()
+    ratio_w2_by_dow_dict = ratio_w2_by_dow_dict = ratio_w2_by_dow.to_dict()
 
     last_day = calendar.monthrange(target_year, target_month)[1]
     date_range = pd.date_range(f"{target_year}-{target_month:02d}-01", periods=last_day, freq="D")
@@ -517,7 +521,6 @@ def make_daily_plan_table(
     raw_sum = df_target["raw"].sum()
     df_target["일별비율"] = (df_target["raw"] / raw_sum) if raw_sum > 0 else (1.0 / last_day)
 
-    # 최근 N년 기반 참고값(에너지)
     month_total_all_mj = df_recent["공급량(MJ)"].sum()
     df_target["최근N년_총공급량(GJ)"] = mj_to_gj(df_target["일별비율"] * month_total_all_mj)
     df_target["최근N년_평균공급량(GJ)"] = df_target["최근N년_총공급량(GJ)"] / len(used_years)
@@ -525,7 +528,6 @@ def make_daily_plan_table(
     df_target["최근N년_총공급량(㎥)"] = mj_to_nm3(df_target["일별비율"] * month_total_all_mj)
     df_target["최근N년_평균공급량(㎥)"] = df_target["최근N년_총공급량(㎥)"] / len(used_years)
 
-    # 계획(월합계)은 MJ로 들어온다고 보고 변환
     row_plan = df_plan[(df_plan["연"] == target_year) & (df_plan["월"] == target_month)]
     plan_total_mj = float(row_plan[plan_col].iloc[0]) if not row_plan.empty else np.nan
 
@@ -556,7 +558,6 @@ def make_daily_plan_table(
         ]
     ].copy()
 
-    # 히트맵용: MJ → GJ로 변환해서 표시
     df_mat_mj = (
         df_recent.pivot_table(index="일", columns="연도", values="공급량(MJ)", aggfunc="sum")
         .sort_index()
@@ -572,13 +573,22 @@ def make_daily_plan_table(
 
 
 def _build_year_daily_plan(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target_year: int, recent_window: int):
+    """
+    연간 시트 만들 때:
+    - 예측(계획) GJ/㎥
+    - 실적 GJ/㎥ (해당 날짜 실적이 있으면 매칭, 없으면 NaN)
+    """
     plan_col = _find_plan_col(df_plan)
+
+    # 타겟연도 실적 맵 (MJ 기준)
+    df_act_year = df_daily[df_daily["연도"] == target_year][["일자", "공급량(MJ)"]].dropna().copy()
+    act_map_mj = dict(zip(df_act_year["일자"].dt.normalize(), df_act_year["공급량(MJ)"]))
 
     all_rows = []
     month_summary_rows = []
 
     for m in range(1, 13):
-        df_res, _, _used_years, _debug = make_daily_plan_table(
+        df_res, _mat, _used_years, _debug = make_daily_plan_table(
             df_daily=df_daily,
             df_plan=df_plan,
             target_year=target_year,
@@ -611,10 +621,6 @@ def _build_year_daily_plan(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target
             )
 
             tmp["일별비율"] = 1.0 / last_day if last_day > 0 else 0.0
-            tmp["최근N년_총공급량(GJ)"] = np.nan
-            tmp["최근N년_평균공급량(GJ)"] = np.nan
-            tmp["최근N년_총공급량(㎥)"] = np.nan
-            tmp["최근N년_평균공급량(㎥)"] = np.nan
             tmp["예상공급량(GJ)"] = (mj_to_gj(tmp["일별비율"] * plan_total_mj)).round(0) if pd.notna(plan_total_mj) else np.nan
             tmp["예상공급량(㎥)"] = (mj_to_nm3(tmp["일별비율"] * plan_total_mj)).round(0) if pd.notna(plan_total_mj) else np.nan
 
@@ -622,11 +628,28 @@ def _build_year_daily_plan(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target
                 [
                     "연", "월", "일", "일자", "요일", "weekday_idx", "nth_dow", "구분",
                     "공휴일여부", "명절여부",
-                    "최근N년_평균공급량(GJ)", "최근N년_총공급량(GJ)",
-                    "최근N년_평균공급량(㎥)", "최근N년_총공급량(㎥)",
-                    "일별비율", "예상공급량(GJ)", "예상공급량(㎥)"
+                    "일별비율", "예상공급량(GJ)", "예상공급량(㎥)",
                 ]
             ].copy()
+        else:
+            # 화면용 df_res는 컬럼이 많으니까 연간에는 핵심만 쓰되, 아래서 실적 컬럼 추가
+            pass
+
+        # 실적 컬럼 추가 (연간 시트용)
+        df_res = df_res.copy()
+        norm_date = pd.to_datetime(df_res["일자"]).dt.normalize()
+        df_res["실적공급량(MJ)"] = norm_date.map(act_map_mj)  # 없으면 NaN
+        df_res["실적공급량(GJ)"] = mj_to_gj(df_res["실적공급량(MJ)"])
+        df_res["실적공급량(㎥)"] = mj_to_nm3(df_res["실적공급량(MJ)"])
+
+        # 연간 시트에 필요한 컬럼 정리
+        keep_cols = [
+            "연", "월", "일", "일자", "요일", "구분", "공휴일여부", "명절여부",
+            "일별비율",
+            "예상공급량(GJ)", "예상공급량(㎥)",
+            "실적공급량(GJ)", "실적공급량(㎥)",
+        ]
+        df_res = df_res[[c for c in keep_cols if c in df_res.columns]].copy()
 
         all_rows.append(df_res)
 
@@ -639,25 +662,14 @@ def _build_year_daily_plan(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target
     df_year = pd.concat(all_rows, ignore_index=True)
     df_year = df_year.sort_values(["월", "일"]).reset_index(drop=True)
 
-    total_row = {
-        "연": "",
-        "월": "",
-        "일": "",
-        "일자": "",
-        "요일": "합계",
-        "weekday_idx": "",
-        "nth_dow": "",
-        "구분": "",
-        "공휴일여부": False,
-        "명절여부": False,
-        "최근N년_평균공급량(GJ)": df_year["최근N년_평균공급량(GJ)"].sum(skipna=True),
-        "최근N년_총공급량(GJ)": df_year["최근N년_총공급량(GJ)"].sum(skipna=True),
-        "최근N년_평균공급량(㎥)": df_year["최근N년_평균공급량(㎥)"].sum(skipna=True),
-        "최근N년_총공급량(㎥)": df_year["최근N년_총공급량(㎥)"].sum(skipna=True),
-        "일별비율": df_year["일별비율"].sum(skipna=True),
-        "예상공급량(GJ)": df_year["예상공급량(GJ)"].sum(skipna=True),
-        "예상공급량(㎥)": df_year["예상공급량(㎥)"].sum(skipna=True),
-    }
+    # 합계행
+    total_row = {c: "" for c in df_year.columns}
+    total_row["요일"] = "합계"
+
+    for c in ["일별비율", "예상공급량(GJ)", "예상공급량(㎥)", "실적공급량(GJ)", "실적공급량(㎥)"]:
+        if c in df_year.columns:
+            total_row[c] = df_year[c].sum(skipna=True)
+
     df_year_with_total = pd.concat([df_year, pd.DataFrame([total_row])], ignore_index=True)
 
     df_month_sum = pd.DataFrame(month_summary_rows).sort_values("월").reset_index(drop=True)
@@ -708,14 +720,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             max_value=slider_max,
             value=min(3, slider_max),
             step=1,
-            help="예: 3년을 선택하면 대상연도 직전 3개 연도의 같은 월 데이터를 사용 (단, 해당월 실적 없는 연도는 자동 제외)",
         )
-
-    st.caption(
-        f"최근 {recent_window}년 후보({target_year-recent_window}년 ~ {target_year-1}년) "
-        f"{target_month}월 패턴으로 {target_year}년 {target_month}월 일별 계획을 계산. "
-        "(해당월 실적이 없는 연도는 자동 제외)"
-    )
 
     df_result, df_mat_gj, used_years, df_debug = make_daily_plan_table(
         df_daily=df_daily,
@@ -729,74 +734,18 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         st.warning("해당 연도/월에 대해 선택한 최근 N년 기준으로 계산할 수 있는 데이터가 없어.")
         return
 
-    st.markdown(f"- 실제 학습에 사용된 연도(해당월 실적 존재): **{min(used_years)}년 ~ {max(used_years)}년 (총 {len(used_years)}개)**")
-
-    row_plan = df_plan[(df_plan["연"] == target_year) & (df_plan["월"] == target_month)]
-    plan_total_mj = float(row_plan[plan_col].iloc[0]) if not row_plan.empty else np.nan
-    plan_total_gj = float(df_result["예상공급량(GJ)"].sum(skipna=True))
-    plan_total_m3 = float(df_result["예상공급량(㎥)"].sum(skipna=True))
-
-    st.markdown(
-        f"**{target_year}년 {target_month}월 사업계획 제출 공급량 합계:** "
-        f"`{plan_total_gj:,.0f} GJ`  /  `{plan_total_m3:,.0f} ㎥`"
-    )
-
-    st.markdown("### 🧩 일별 공급량 분배 기준")
-    st.markdown(
-        """
-- **주말/공휴일/명절**: **'요일(토/일) + 그 달의 n번째' 기준 평균** (공휴일/명절도 주말 패턴으로 묶음)
-- **평일**: '평일1(월·금)' / '평일2(화·수·목)'로 구분  
-  기본은 **'요일 + 그 달의 n번째(1째 월요일, 2째 월요일...)' 기준 평균**
-- 일부 케이스 데이터가 부족하면 **'요일 평균'으로 보정**
-- 마지막에 **일별비율 합계가 1이 되도록 정규화(raw / SUM(raw))**
-        """.strip()
-    )
-
-    # 월별 계획 표: 우측 상단 단위 표기
-    st.markdown(
-        """
-<div style="display:flex; justify-content:space-between; align-items:flex-end;">
-  <div><b>📌 월별 계획량(1~12월) & 연간 총량</b></div>
-  <div style="color:#666;">[단위:GJ]</div>
-</div>
-        """.strip(),
-        unsafe_allow_html=True
-    )
-
+    st.markdown("#### 📌 월별 계획량(1~12월) & 연간 총량")
+    # ✅ 여기서 우측 상단 [단위:GJ] 표기는 완전히 제거
     df_plan_h = make_month_plan_horizontal(df_plan, target_year=int(target_year), plan_col=plan_col)
-    df_plan_h_disp = format_table_generic(df_plan_h)  # GJ + ㎥ 둘 다 숫자 포맷
+    df_plan_h_disp = format_table_generic(df_plan_h)
     show_table_no_index(df_plan_h_disp, height=140)
 
-    # 1) 일별 테이블 (GJ 옆에 ㎥ 컬럼 포함)
     st.markdown("#### 📋 1. 일별 비율, 예상 공급량 테이블")
-
     view = df_result.copy()
 
-    total_row = {
-        "연": "",
-        "월": "",
-        "일": "",
-        "일자": "",
-        "요일": "합계",
-        "weekday_idx": "",
-        "nth_dow": "",
-        "구분": "",
-        "공휴일여부": False,
-        "명절여부": False,
-        "최근N년_평균공급량(GJ)": view["최근N년_평균공급량(GJ)"].sum(skipna=True),
-        "최근N년_총공급량(GJ)": view["최근N년_총공급량(GJ)"].sum(skipna=True),
-        "최근N년_평균공급량(㎥)": view["최근N년_평균공급량(㎥)"].sum(skipna=True),
-        "최근N년_총공급량(㎥)": view["최근N년_총공급량(㎥)"].sum(skipna=True),
-        "일별비율": view["일별비율"].sum(skipna=True),
-        "예상공급량(GJ)": view["예상공급량(GJ)"].sum(skipna=True),
-        "예상공급량(㎥)": view["예상공급량(㎥)"].sum(skipna=True),
-    }
-    view_with_total = pd.concat([view, pd.DataFrame([total_row])], ignore_index=True)
-
-    view_for_format = view_with_total[
+    view_for_format = view[
         [
             "연", "월", "일", "요일", "weekday_idx", "nth_dow", "구분", "공휴일여부",
-            "최근N년_평균공급량(GJ)", "최근N년_총공급량(GJ)",
             "예상공급량(GJ)", "예상공급량(㎥)",
             "일별비율",
         ]
@@ -804,14 +753,12 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     view_for_format = format_table_generic(view_for_format, percent_cols=["일별비율"])
     show_table_no_index(view_for_format, height=520)
 
-    with st.expander("🔎 (검증) 대상월 '1째 월요일/2째 월요일...' 계산 확인 (weekday_idx/nth_dow/raw/비율)"):
+    with st.expander("🔎 (검증) 대상월 '1째 월요일/2째 월요일...' 계산 확인"):
         dbg_disp = format_table_generic(df_debug.copy(), percent_cols=["일별비율"])
         show_table_no_index(dbg_disp, height=420)
 
-    # 2) 그래프 (GJ 기준)
-    st.markdown("#### 📊 2. 일별 예상 공급량 & 비율 그래프(평일1/평일2/주말 분리)")
+    st.markdown("#### 📊 2. 일별 예상 공급량(GJ) & 비율 그래프(평일1/평일2/주말 분리)")
 
-    # 설/추석(명절여부=True)만 투명 처리
     w1_df = view[view["구분"] == "평일1(월·금)"]
     w2_df = view[view["구분"] == "평일2(화·수·목)"]
 
@@ -843,96 +790,20 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             x=view["일"],
             y=view["일별비율"],
             mode="lines+markers",
-            name=f"일별비율 (최근{len(used_years)}년 실제 사용)",
+            name=f"일별비율 (최근{len(used_years)}년)",
             yaxis="y2",
         )
     )
 
     fig.update_layout(
-        title=(
-            f"{target_year}년 {target_month}월 일별 공급량 계획 "
-            f"(최근{recent_window}년 후보 중 실제 사용 {len(used_years)}년, {target_month}월 패턴 기반)"
-        ),
         xaxis_title="일",
         yaxis=dict(title="예상 공급량 (GJ)"),
         yaxis2=dict(title="일별비율", overlaying="y", side="right"),
         barmode="group",
-        margin=dict(l=20, r=20, t=60, b=40),
+        margin=dict(l=20, r=20, t=40, b=40),
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # 3) 매트릭스(Heatmap) — GJ로 표시
-    st.markdown("#### 🧊 3. 최근 N년 일별 실적 매트릭스 (GJ)")
-
-    if df_mat_gj is not None:
-        fig_hm = go.Figure(
-            data=go.Heatmap(
-                z=df_mat_gj.values,
-                x=[str(c) for c in df_mat_gj.columns],
-                y=df_mat_gj.index,
-                colorbar_title="공급량(GJ)",
-                colorscale="RdBu_r",
-            )
-        )
-        fig_hm.update_layout(
-            title=f"최근 {len(used_years)}년 {target_month}월 일별 실적 공급량(GJ) 매트릭스",
-            xaxis=dict(title="연도", type="category"),
-            yaxis=dict(title="일", autorange="reversed"),
-            margin=dict(l=40, r=40, t=60, b=40),
-        )
-        st.plotly_chart(fig_hm, use_container_width=False)
-
-    # 4) 구분별 비중 요약 (GJ + ㎥)
-    st.markdown("#### 🧾 4. 구분별 비중 요약(평일1/평일2/주말)")
-
-    summary = (
-        view.groupby("구분", as_index=False)[["일별비율", "예상공급량(GJ)", "예상공급량(㎥)"]]
-        .sum()
-        .rename(columns={"일별비율": "일별비율합계"})
-    )
-    total_row_sum = {
-        "구분": "합계",
-        "일별비율합계": summary["일별비율합계"].sum(),
-        "예상공급량(GJ)": summary["예상공급량(GJ)"].sum(),
-        "예상공급량(㎥)": summary["예상공급량(㎥)"].sum(),
-    }
-    summary = pd.concat([summary, pd.DataFrame([total_row_sum])], ignore_index=True)
-    summary = format_table_generic(summary, percent_cols=["일별비율합계"])
-    show_table_no_index(summary, height=240)
-
-    # 5) 엑셀 다운로드(월 단위) — GJ + ㎥ 포함
-    st.markdown("#### 💾 5. 일별 계획 엑셀 다운로드")
-
-    buffer = BytesIO()
-    sheet_name = f"{target_year}_{target_month:02d}_일별계획"
-
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        # 다운로드에는 GJ/㎥ 중심으로 저장
-        export_cols = [
-            "연", "월", "일", "일자", "요일", "weekday_idx", "nth_dow", "구분", "공휴일여부", "명절여부",
-            "일별비율",
-            "예상공급량(GJ)", "예상공급량(㎥)",
-            "최근N년_평균공급량(GJ)", "최근N년_총공급량(GJ)",
-            "최근N년_평균공급량(㎥)", "최근N년_총공급량(㎥)",
-        ]
-        view_with_total[export_cols].to_excel(writer, index=False, sheet_name=sheet_name)
-
-        wb = writer.book
-        ws = wb[sheet_name]
-
-        for c in range(1, ws.max_column + 1):
-            ws.cell(1, c).font = Font(bold=True)
-
-        _format_excel_sheet(ws, freeze="A2", center=True)
-
-    st.download_button(
-        label=f"📥 {target_year}년 {target_month}월 일별공급계획 다운로드 (Excel)",
-        data=buffer.getvalue(),
-        file_name=f"{target_year}_{target_month:02d}_일별공급계획_GJ_㎥.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-    # 6) 연간 다운로드 + 누적계획량 시트(GJ/㎥)
     st.markdown("#### 🗂️ 6. 일일계획 다운로드(연간)")
 
     years_plan = sorted(df_plan["연"].unique())
@@ -943,7 +814,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         key="annual_year_select",
     )
 
-    default_asof = dt.date(int(annual_year), 1, 15)
+    default_asof = dt.date(int(annual_year), 1, 16)
     asof_date = st.date_input(
         "누적 기준일 선택(누적계획량 시트 계산용)",
         value=default_asof,
@@ -976,13 +847,13 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         _format_excel_sheet(ws_y, freeze="A2", center=True)
         _format_excel_sheet(ws_m, freeze="A2", center=True)
 
-        # 누적계획량 시트 추가 (GJ/㎥)
+        # ✅ 누적계획량(일대비 진행률) 시트 생성
         _add_cumulative_plan_sheet(wb, asof_date=asof_date)
 
     st.download_button(
         label=f"📥 {annual_year}년 연간 일별공급계획 다운로드 (Excel)",
         data=buffer_year.getvalue(),
-        file_name=f"{annual_year}_연간_일별공급계획_GJ_㎥.xlsx",
+        file_name=f"{annual_year}_연간_일별공급계획_GJ_㎥(일대비진행률).xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="download_annual_excel",
     )
@@ -995,48 +866,7 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
     min_year_model = int(df["연도"].min())
     max_year_model = int(df["연도"].max())
 
-    st.subheader("📊 0. 상관도 분석 (공급량 vs 주요 변수)")
-
-    df_corr_raw = load_corr_data()
-    if df_corr_raw is None:
-        st.caption("상관도분석.xlsx 파일이 없어서 상관도 매트릭스를 표시하지 못했어.")
-    else:
-        num_df = df_corr_raw.select_dtypes(include=["number"]).copy()
-        num_cols = list(num_df.columns)
-
-        if len(num_cols) >= 2:
-            corr = num_df.corr()
-            z = np.clip(corr.values, -0.7, 0.7)
-            text = corr.round(2).astype(str).values
-
-            fig_corr = go.Figure(
-                data=go.Heatmap(
-                    z=z,
-                    x=corr.columns,
-                    y=corr.index,
-                    zmin=-0.7,
-                    zmax=0.7,
-                    zmid=0,
-                    colorbar_title="상관계수",
-                    text=text,
-                    texttemplate="%{text}",
-                    textfont=dict(size=10, color="black"),
-                )
-            )
-            fig_corr.update_layout(
-                xaxis_title="변수",
-                yaxis_title="변수",
-                xaxis=dict(side="top", tickangle=45),
-                yaxis=dict(autorange="reversed"),
-                width=600,
-                height=600,
-                margin=dict(l=80, r=20, t=80, b=80),
-            )
-            st.plotly_chart(fig_corr, use_container_width=True)
-        else:
-            st.caption("숫자 컬럼이 2개 미만이라 상관도 분석을 할 수 없어.")
-
-    st.subheader("📚 ① 데이터 학습기간 선택 (3차 다항식 R² 계산용)")
+    st.subheader("📚 데이터 학습기간 선택 (3차 다항식 R² 계산용)")
 
     train_default_start = max(min_year_model, max_year_model - 4)
     train_start, train_end = st.slider(
@@ -1047,10 +877,8 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
         step=1,
     )
 
-    st.caption(f"현재 학습 구간: **{train_start}년 ~ {train_end}년**")
     df_window = df[df["연도"].between(train_start, train_end)].copy()
 
-    # 월 단위: 공급량(MJ) 합계를 GJ로 변환해서 표시/학습(스케일만 바뀜)
     df_month = (
         df_window
         .groupby(["연도", "월"], as_index=False)
@@ -1061,48 +889,15 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
     coef_m, y_pred_m, r2_m = fit_poly3_and_r2(df_month["평균기온"], df_month["공급량_GJ"])
     df_month["예측공급량_GJ"] = y_pred_m if y_pred_m is not None else np.nan
 
-    # 일 단위
     df_window["공급량_GJ"] = df_window["공급량(MJ)"] / MJ_PER_GJ
     coef_d, y_pred_d, r2_d = fit_poly3_and_r2(df_window["평균기온(℃)"], df_window["공급량_GJ"])
     df_window["예측공급량_GJ"] = y_pred_d if y_pred_d is not None else np.nan
 
-    st.markdown("##### 월평균 vs 일평균 기온 기반 R² 비교 (학습기간 기준)")
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**월 단위 모델 (월평균 기온 → 월별 공급량)**")
-        if r2_m is not None:
-            st.metric("R² (월평균 기온 사용)", f"{r2_m:.3f}")
-            st.caption(f"사용 월 수: {len(df_month)}")
-        else:
-            st.write("월 단위 회귀에 필요한 데이터가 부족해.")
-
+        st.metric("R² (월평균 기온, GJ)", f"{r2_m:.3f}" if r2_m is not None else "-")
     with col2:
-        st.markdown("**일 단위 모델 (일평균 기온 → 일별 공급량)**")
-        if r2_d is not None:
-            st.metric("R² (일평균 기온 사용)", f"{r2_d:.3f}")
-            st.caption(f"사용 일 수: {len(df_window)}")
-        else:
-            st.write("일 단위 회귀에 필요한 데이터가 부족해.")
-
-    st.subheader("📈 기온–공급량 관계 (실적 vs 3차 다항식 곡선)")
-    col3, col4 = st.columns(2)
-    with col3:
-        if coef_m is not None:
-            fig_m = plot_poly_fit(
-                df_month["평균기온"], df_month["공급량_GJ"], coef_m,
-                title="월단위: 월평균 기온 vs 월별 공급량(GJ)",
-                x_label="월평균 기온 (℃)", y_label="월별 공급량 합계 (GJ)"
-            )
-            st.plotly_chart(fig_m, use_container_width=True)
-
-    with col4:
-        if coef_d is not None:
-            fig_d = plot_poly_fit(
-                df_window["평균기온(℃)"], df_window["공급량_GJ"], coef_d,
-                title="일단위: 일평균 기온 vs 일별 공급량(GJ)",
-                x_label="일평균 기온 (℃)", y_label="일별 공급량 (GJ)"
-            )
-            st.plotly_chart(fig_d, use_container_width=True)
+        st.metric("R² (일평균 기온, GJ)", f"{r2_d:.3f}" if r2_d is not None else "-")
 
 
 # ─────────────────────────────────────────────
