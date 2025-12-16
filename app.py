@@ -1,3 +1,5 @@
+import re, textwrap, os, pathlib, json, math, pandas as pd
+code = r'''
 import calendar
 from io import BytesIO
 from pathlib import Path
@@ -24,11 +26,16 @@ def mj_to_m3(x):
     return x / MJ_PER_NM3
 
 
-def add_gj_m3_columns(df: pd.DataFrame, mj_cols: list[str], drop_mj: bool = True, round_digits: int = 0) -> pd.DataFrame:
+def add_gj_m3_columns(
+    df: pd.DataFrame,
+    mj_cols: list[str],
+    drop_mj: bool = True,
+    round_digits: int | None = 0,
+) -> pd.DataFrame:
     """
     df 안의 MJ 컬럼들을 (GJ), (㎥) 컬럼으로 환산해 추가/치환.
     - ㎥는 'MJ / 42.563' 기준
-    - round_digits=0이면 정수 표기 용도로 반올림
+    - round_digits=None 이면 반올림 안함
     """
     out = df.copy()
     for c in mj_cols:
@@ -49,6 +56,48 @@ def add_gj_m3_columns(df: pd.DataFrame, mj_cols: list[str], drop_mj: bool = True
         drop_cols = [c for c in mj_cols if c in out.columns]
         out = out.drop(columns=drop_cols)
     return out
+
+
+# ─────────────────────────────────────────────
+# 컬럼명 유연 매칭(이번 KeyError 원인 해결)
+# ─────────────────────────────────────────────
+def _norm(s: str) -> str:
+    return "".join(ch for ch in str(s) if ch.isalnum()).lower()
+
+
+def resolve_plan_col(df: pd.DataFrame, preferred: str) -> str:
+    """
+    엑셀에서 '사업계획(월별 계획)'처럼 띄어쓰기/특수문자 차이로 컬럼명이 바뀌어도 잡아내기.
+    """
+    cols = list(df.columns)
+
+    # 1) 정확히 일치
+    if preferred in cols:
+        return preferred
+
+    # 2) 정규화 후 일치
+    pref_n = _norm(preferred)
+    for c in cols:
+        if _norm(c) == pref_n:
+            return c
+
+    # 3) 토큰 기반 탐색 (사업계획 + 월별 + 계획)
+    tokens = [_norm("사업계획"), _norm("월별"), _norm("계획")]
+    candidates = []
+    for c in cols:
+        cn = _norm(c)
+        if all(t in cn for t in tokens):
+            candidates.append(c)
+
+    if candidates:
+        # 가장 짧은(군더더기 적은) 후보 우선
+        candidates = sorted(candidates, key=lambda x: len(str(x)))
+        return candidates[0]
+
+    # 4) 못 찾으면, 어떤 컬럼이 있는지 메시지 포함해서 KeyError
+    raise KeyError(
+        f"월별 계획 컬럼을 찾지 못했어. 기대: '{preferred}' / 실제 컬럼: {cols}"
+    )
 
 
 # ─────────────────────────────────────────────
@@ -92,6 +141,19 @@ def load_corr_data() -> pd.DataFrame | None:
 def load_monthly_plan() -> pd.DataFrame:
     excel_path = Path(__file__).parent / "공급량(계획_실적).xlsx"
     df = pd.read_excel(excel_path, sheet_name="월별계획_실적")
+
+    # 연/월 컬럼명도 혹시 다를 수 있어 최소한의 보정
+    if "연" not in df.columns:
+        for cand in ["연도", "년도", "YEAR"]:
+            if cand in df.columns:
+                df = df.rename(columns={cand: "연"})
+                break
+    if "월" not in df.columns:
+        for cand in ["MONTH", "월(숫자)"]:
+            if cand in df.columns:
+                df = df.rename(columns={cand: "월"})
+                break
+
     df["연"] = df["연"].astype(int)
     df["월"] = df["월"].astype(int)
     return df
@@ -139,49 +201,28 @@ def format_table_generic(df: pd.DataFrame, percent_cols=None) -> pd.DataFrame:
     return out
 
 
-def add_monthly_summary_table(df_plan: pd.DataFrame, target_year: int, plan_col: str) -> pd.DataFrame:
-    df_year = df_plan[df_plan["연"] == target_year][["월", plan_col]].copy()
-    df_year = df_year.rename(columns={plan_col: "월별 계획(MJ)"})
-    df_year["월"] = df_year["월"].astype(int)
-    df_year = df_year.sort_values("월")
-    df_year["월"] = df_year["월"].astype(str) + "월"
-
-    total_val = df_year["월별 계획(MJ)"].sum(skipna=True)
-    df_total = pd.DataFrame([{"월": "연간합계", "월별 계획(MJ)": total_val}])
-    return pd.concat([df_year, df_total], ignore_index=True)
-
-
 def make_month_plan_horizontal(df_plan: pd.DataFrame, target_year: int, plan_col: str) -> pd.DataFrame:
     """
-    월별 계획 표를 1행(가로)로 만들어서 더 깔끔하게 보여주기.
-    - 기존 MJ 표기는 **GJ로 변경**
-    - 그 아래 **㎥(Nm³)** 도 함께 표기 (환산: 42.563 MJ/Nm³)
-    컬럼: 1월..12월, 연간합계
+    월별 계획 표(가로) + 연간 총량
+    - 화면에서 MJ → GJ로 표시
+    - 아래 행으로 ㎥(Nm³)도 함께 표시
     """
     df_year = df_plan[df_plan["연"] == target_year][["월", plan_col]].copy()
+
     base = pd.DataFrame({"월": list(range(1, 13))})
     df_year = base.merge(df_year, on="월", how="left")
     df_year = df_year.rename(columns={plan_col: "월별 계획(MJ)"})
 
-    # 환산(월별)
     df_year["월별 계획(GJ)"] = mj_to_gj(df_year["월별 계획(MJ)"].astype("float64")).round(0)
     df_year["월별 계획(㎥)"] = mj_to_m3(df_year["월별 계획(MJ)"].astype("float64")).round(0)
 
     total_gj = df_year["월별 계획(GJ)"].sum(skipna=True)
     total_m3 = df_year["월별 계획(㎥)"].sum(skipna=True)
 
-    # 가로 1행으로 전환 (GJ)
-    row_gj = {}
-    for m in range(1, 13):
-        v = df_year.loc[df_year["월"] == m, "월별 계획(GJ)"].iloc[0]
-        row_gj[f"{m}월"] = v
+    row_gj = {f"{m}월": df_year.loc[df_year["월"] == m, "월별 계획(GJ)"].iloc[0] for m in range(1, 13)}
     row_gj["연간합계"] = total_gj
 
-    # 가로 1행으로 전환 (㎥)
-    row_m3 = {}
-    for m in range(1, 13):
-        v = df_year.loc[df_year["월"] == m, "월별 계획(㎥)"].iloc[0]
-        row_m3[f"{m}월"] = v
+    row_m3 = {f"{m}월": df_year.loc[df_year["월"] == m, "월별 계획(㎥)"].iloc[0] for m in range(1, 13)}
     row_m3["연간합계"] = total_m3
 
     out = pd.DataFrame([row_gj, row_m3])
@@ -202,10 +243,8 @@ def _make_target_calendar(target_year: int, target_month: int) -> pd.DataFrame:
     df["요일번호"] = df["일자"].dt.weekday  # 월=0 ... 일=6
     df["요일"] = df["요일번호"].map({0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"})
 
-    # weekday_idx: 같은 달의 "n번째 요일"
     df["weekday_idx"] = df.groupby("요일번호").cumcount() + 1
     df["nth_dow"] = df["weekday_idx"].astype(str) + "째 " + df["요일"]
-
     return df
 
 
@@ -221,7 +260,6 @@ def _classify_day(df_target: pd.DataFrame, df_cal: pd.DataFrame | None) -> pd.Da
                 df[col] = df[f"{col}_cal"].fillna(False).astype(bool)
                 df = df.drop(columns=[f"{col}_cal"])
 
-    # 구분: 주말/공휴일, 평일1(월·금), 평일2(화·수·목)
     df["is_weekend"] = df["요일번호"].isin([5, 6])
     df["is_holiday"] = df["공휴일여부"] | df["명절여부"]
     df["is_weekday1"] = df["요일번호"].isin([0, 4])  # 월/금
@@ -251,25 +289,18 @@ def _prepare_recent_month(df_daily: pd.DataFrame, years: list[int], target_month
 def _compute_ratios(df_recent: pd.DataFrame, df_target: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, list[int]]:
     used_years = sorted(df_recent["연도"].dropna().unique().astype(int).tolist())
 
-    # 과거 데이터에서 "주말/공휴일 / 평일1 / 평일2" 구분해 ratio 추출
-    # - 주말/공휴일: dow 기반 평균
-    # - 평일1/2: nth_dow 기반 (없으면 dow 기반 fallback)
     df_recent = df_recent.copy()
     df_recent["is_weekend"] = df_recent["요일번호"].isin([5, 6])
 
-    # 과거 달력(공휴일/명절) 컬럼은 df_daily에 없으므로 주말만 일단 잡고,
-    # target에서는 effective_calendar로 공휴일/명절 포함해서 주말/공휴일 구분
     df_recent["구분"] = "평일2(화·수·목)"
     df_recent["is_weekday1"] = df_recent["요일번호"].isin([0, 4])
     df_recent.loc[df_recent["is_weekday1"], "구분"] = "평일1(월·금)"
     df_recent.loc[df_recent["is_weekend"], "구분"] = "주말/공휴일"
 
-    # ratio 계산용 raw=공급량(MJ)
     grp = df_recent.groupby(["구분", "nth_dow"], as_index=False)["공급량(MJ)"].mean()
     ratio_w1_group = grp[grp["구분"] == "평일1(월·금)"].copy()
     ratio_w2_group = grp[grp["구분"] == "평일2(화·수·목)"].copy()
 
-    # dow fallback
     grp_dow = df_recent.groupby(["구분", "요일번호"], as_index=False)["공급량(MJ)"].mean()
     ratio_w1_by_dow = grp_dow[grp_dow["구분"] == "평일1(월·금)"].copy()
     ratio_w2_by_dow = grp_dow[grp_dow["구분"] == "평일2(화·수·목)"].copy()
@@ -289,10 +320,7 @@ def _compute_ratios(df_recent: pd.DataFrame, df_target: pd.DataFrame) -> tuple[p
         dow = row["요일번호"]
 
         if row["구분"] == "주말/공휴일":
-            v = ratio_weekend_by_dow_dict.get(dow, None)
-            if v is None or pd.isna(v):
-                v = ratio_weekend_by_dow_dict.get(dow, None)
-            return v
+            return ratio_weekend_by_dow_dict.get(dow, None)
 
         if bool(row["is_weekday1"]):
             v = ratio_w1_group_dict.get(key, None)
@@ -401,14 +429,14 @@ def _build_year_daily_plan(
     df_plan: pd.DataFrame,
     target_year: int,
     recent_window: int,
+    plan_col: str,
 ):
     df_cal = load_effective_calendar()
-    plan_col = "사업계획(월별계획)"
     out_all = []
     month_summary_rows = []
 
     for m in range(1, 13):
-        df_result, _, _, used_years, plan_total = make_daily_plan_table(
+        df_result, _, _, _, plan_total = make_daily_plan_table(
             df_daily=df_daily,
             df_plan=df_plan,
             target_year=target_year,
@@ -447,20 +475,23 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     df_plan = load_monthly_plan()
     df_cal = load_effective_calendar()
 
+    # ✅ plan_col을 실제 파일 컬럼명으로 자동 맞춤 (이번 KeyError 해결)
+    plan_col = resolve_plan_col(df_plan, "사업계획(월별계획)")
+
     st.sidebar.markdown("### ✅ Daily 공급량 계획 설정")
     years = sorted(df_plan["연"].dropna().unique().astype(int).tolist())
-    if 2025 in years:
-        default_year = 2025
-    else:
-        default_year = years[-1] if years else 2025
+    default_year = 2025 if 2025 in years else (years[-1] if years else 2025)
 
-    target_year = st.sidebar.selectbox("계획 연도 선택", years if years else [default_year], index=(years.index(default_year) if years and default_year in years else 0))
+    target_year = st.sidebar.selectbox(
+        "계획 연도 선택",
+        years if years else [default_year],
+        index=(years.index(default_year) if years and default_year in years else 0),
+    )
 
     months = list(range(1, 13))
     target_month = st.sidebar.selectbox("계획 월 선택", months, index=0)
 
     recent_window = st.sidebar.slider("최근 N년 후보(최대 몇 년 전까지)", min_value=2, max_value=6, value=3, step=1)
-    plan_col = "사업계획(월별계획)"
 
     # 0) 월별 계획표(가로) + 연간 총량
     st.markdown("### 📌 월별 계획량(1~12월) & 연간 총량")
@@ -522,7 +553,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         round_digits=0,
     )
 
-    # 보기 좋은 컬럼 순서
     view_for_format = view_for_format[
         [
             "연", "월", "일", "요일", "weekday_idx", "nth_dow", "구분", "공휴일여부",
@@ -606,7 +636,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         .sum()
         .rename(columns={"일별비율": "일별비율합계"})
     )
-    # GJ→㎥ 환산은 (GJ*1000)/42.563
     summary["예상공급량(㎥)"] = mj_to_m3((summary["예상공급량(GJ)"] * 1000.0).astype("float64")).round(0)
 
     total_row_sum = {
@@ -619,7 +648,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     summary = format_table_generic(summary, percent_cols=["일별비율합계"])
     show_table_no_index(summary, height=220)
 
-    # 5) 월별 다운로드(대상월)
+    # 5) 월별 다운로드(대상월) — GJ/㎥ 둘 다 포함
     st.markdown("#### ⬇️ 5. 일일계획 다운로드(월별)")
     buffer = BytesIO()
     sheet_name = f"{target_year}-{target_month:02d}"
@@ -652,8 +681,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             col_letter = col[0].column_letter
             for cell in col:
                 val = "" if cell.value is None else str(cell.value)
-                if len(val) > max_len:
-                    max_len = len(val)
+                max_len = max(max_len, len(val))
             ws.column_dimensions[col_letter].width = min(max(10, max_len + 2), 24)
 
     st.download_button(
@@ -663,15 +691,22 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # 6) 연간 다운로드
+    # 6) 연간 다운로드 — GJ/㎥ 둘 다 포함
     st.markdown("#### ⬇️ 6. 일일계획 다운로드(연간)")
-    annual_year = st.selectbox("연간 다운로드 연도 선택", years if years else [default_year], index=(years.index(default_year) if years and default_year in years else 0), key="annual_year")
+    annual_year = st.selectbox(
+        "연간 다운로드 연도 선택",
+        years if years else [default_year],
+        index=(years.index(default_year) if years and default_year in years else 0),
+        key="annual_year",
+    )
     buffer_year = BytesIO()
+
     df_year_daily, df_month_summary = _build_year_daily_plan(
         df_daily=df_daily,
         df_plan=df_plan,
         target_year=int(annual_year),
         recent_window=int(recent_window),
+        plan_col=plan_col,  # ✅ 동일하게 적용
     )
 
     with pd.ExcelWriter(buffer_year, engine="openpyxl") as writer:
@@ -694,7 +729,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         df_month_excel.to_excel(writer, index=False, sheet_name="월 요약 계획")
 
         wb = writer.book
-
         for sheet in ["연간", "월 요약 계획"]:
             ws = wb[sheet]
             header_font = Font(bold=True)
@@ -803,11 +837,6 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
     st.markdown("---")
     st.markdown("### 🔍 산점도 + 회귀곡선 (월/일)")
 
-    col3 = st.columns(2)
-    col3 = col3[0]
-    col4 = st.columns(2)
-    col4 = col4[1]
-
     col3, col4 = st.columns(2)
     with col3:
         if coef_m is not None:
@@ -879,3 +908,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+'''
+path = "/mnt/data/app.py"
+with open(path, "w", encoding="utf-8") as f:
+    f.write(code)
+path
