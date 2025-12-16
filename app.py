@@ -1,4 +1,5 @@
 import calendar
+import datetime as dt
 from io import BytesIO
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from openpyxl.styles import Alignment, Font
+from openpyxl.utils import get_column_letter
 
 
 # ─────────────────────────────────────────────
@@ -150,21 +152,18 @@ def show_table_no_index(df: pd.DataFrame, height: int = 260):
     Streamlit 버전차로 hide_index 지원 유무가 달라서 안전하게 처리.
     """
     df_to_show = df.copy()
-    # 보이는 인덱스(0~N) 자체가 싫다면, 인덱스를 의미없는 값으로 두고 숨김을 시도
     try:
         st.dataframe(df_to_show, use_container_width=True, hide_index=True, height=height)
         return
     except TypeError:
         pass
 
-    # fallback: Styler hide
     try:
         st.table(df_to_show.style.hide(axis="index"))
         return
     except Exception:
         pass
 
-    # last resort
     st.table(df_to_show)
 
 
@@ -197,10 +196,6 @@ def _find_plan_col(df_plan: pd.DataFrame) -> str:
 
 
 def make_month_plan_horizontal(df_plan: pd.DataFrame, target_year: int, plan_col: str) -> pd.DataFrame:
-    """
-    월별 계획 표를 1행(가로)로 만들어서 더 깔끔하게 보여주기.
-    컬럼: 1월..12월, 연간합계
-    """
     df_year = df_plan[df_plan["연"] == target_year][["월", plan_col]].copy()
     base = pd.DataFrame({"월": list(range(1, 13))})
     df_year = base.merge(df_year, on="월", how="left")
@@ -208,7 +203,6 @@ def make_month_plan_horizontal(df_plan: pd.DataFrame, target_year: int, plan_col
 
     total_val = df_year["월별 계획(MJ)"].sum(skipna=True)
 
-    # 가로 1행으로 전환
     row = {}
     for m in range(1, 13):
         v = df_year.loc[df_year["월"] == m, "월별 계획(MJ)"].iloc[0]
@@ -218,6 +212,95 @@ def make_month_plan_horizontal(df_plan: pd.DataFrame, target_year: int, plan_col
     out = pd.DataFrame([row])
     out.insert(0, "구분", "사업계획(월별 계획)")
     return out
+
+
+def _excel_find_col_letter(ws, header_name: str) -> str | None:
+    header = [c.value for c in ws[1]]
+    for idx, name in enumerate(header, start=1):
+        if str(name).strip() == header_name:
+            return get_column_letter(idx)
+    return None
+
+
+def _add_cumulative_plan_sheet(wb, asof_date: dt.date):
+    """
+    연간 시트를 기반으로 누적계획량(일/월/연)을 Excel 수식으로 자동 계산하는 시트 추가.
+    - MJ만
+    - 기준일(B1)을 바꾸면 자동 재계산되게 SUMIFS 사용
+    """
+    if "연간" not in wb.sheetnames:
+        return
+
+    ws_y = wb["연간"]
+
+    date_col = _excel_find_col_letter(ws_y, "일자")
+    val_col = _excel_find_col_letter(ws_y, "예상공급량(MJ)")
+    year_col = _excel_find_col_letter(ws_y, "연")
+    month_col = _excel_find_col_letter(ws_y, "월")
+
+    if not all([date_col, val_col, year_col, month_col]):
+        return
+
+    ws_c = wb.create_sheet("누적계획량")
+
+    ws_c["A1"].value = "기준일"
+    ws_c["B1"].value = asof_date
+    ws_c["B1"].number_format = "yyyy-mm-dd"
+
+    ws_c["A3"].value = "구분"
+    ws_c["B3"].value = "목표량(MJ)"
+    ws_c["C3"].value = "누적계획량(MJ)"
+    ws_c["D3"].value = "진행률(%)"
+
+    for c in range(1, 5):
+        ws_c.cell(3, c).font = Font(bold=True)
+        ws_c.cell(3, c).alignment = Alignment(horizontal="center", vertical="center")
+
+    ws_c["A4"].value = "일"
+    ws_c["A5"].value = "월"
+    ws_c["A6"].value = "연"
+
+    rng_val = f"연간!${val_col}:${val_col}"
+    rng_date = f"연간!${date_col}:${date_col}"
+    rng_year = f"연간!${year_col}:${year_col}"
+    rng_month = f"연간!${month_col}:${month_col}"
+
+    # 일(해당일 계획)
+    ws_c["B4"].value = f'=SUMIFS({rng_val},{rng_date},$B$1)'
+    ws_c["C4"].value = f'=SUMIFS({rng_val},{rng_date},$B$1)'
+    ws_c["D4"].value = "=IFERROR(C4/B4,0)"
+
+    # 월(월간 목표 / 월 누적)
+    ws_c["B5"].value = f'=SUMIFS({rng_val},{rng_year},YEAR($B$1),{rng_month},MONTH($B$1))'
+    ws_c["C5"].value = (
+        f'=SUMIFS({rng_val},'
+        f'{rng_date},"<="&$B$1,'
+        f'{rng_date},">="&DATE(YEAR($B$1),MONTH($B$1),1))'
+    )
+    ws_c["D5"].value = "=IFERROR(C5/B5,0)"
+
+    # 연(연간 목표 / 연 누적)
+    ws_c["B6"].value = f'=SUMIFS({rng_val},{rng_year},YEAR($B$1))'
+    ws_c["C6"].value = (
+        f'=SUMIFS({rng_val},'
+        f'{rng_date},"<="&$B$1,'
+        f'{rng_date},">="&DATE(YEAR($B$1),1,1))'
+    )
+    ws_c["D6"].value = "=IFERROR(C6/B6,0)"
+
+    for r in range(4, 7):
+        ws_c[f"A{r}"].alignment = Alignment(horizontal="center", vertical="center")
+        ws_c[f"B{r}"].number_format = "#,##0"
+        ws_c[f"C{r}"].number_format = "#,##0"
+        ws_c[f"D{r}"].number_format = "0.00%"
+        for col in ["B", "C", "D"]:
+            ws_c[f"{col}{r}"].alignment = Alignment(horizontal="center", vertical="center")
+
+    ws_c.freeze_panes = "A4"
+    ws_c.column_dimensions["A"].width = 10
+    ws_c.column_dimensions["B"].width = 18
+    ws_c.column_dimensions["C"].width = 18
+    ws_c.column_dimensions["D"].width = 14
 
 
 # ─────────────────────────────────────────────
@@ -278,7 +361,6 @@ def make_daily_plan_table(
     df_recent["month_total"] = df_recent.groupby("연도")["공급량(MJ)"].transform("sum")
     df_recent["ratio"] = df_recent["공급량(MJ)"] / df_recent["month_total"]
 
-    # 같은 연도에서 "그 요일의 n번째" (1째 월요일, 2째 월요일...)
     df_recent["nth_dow"] = (
         df_recent.sort_values(["연도", "일"])
         .groupby(["연도", "weekday_idx"])
@@ -618,7 +700,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         f"`{plan_total:,.0f} MJ`"
     )
 
-    # ★ 요청: 소제목 + 아이콘
     st.markdown("### 🧩 일별 공급량 분배 기준")
     st.markdown(
         """
@@ -633,13 +714,11 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         """.strip()
     )
 
-    # ★ 요청: 월별 계획 표 (인덱스 제거 + 가로버전)
     st.markdown("#### 📌 월별 계획량(1~12월) & 연간 총량")
     df_plan_h = make_month_plan_horizontal(df_plan, target_year=int(target_year), plan_col=plan_col)
     df_plan_h_disp = format_table_generic(df_plan_h)
     show_table_no_index(df_plan_h_disp, height=120)
 
-    # 1) 일별 테이블
     st.markdown("#### 📋 1. 일별 비율, 예상 공급량 테이블")
 
     view = df_result.copy()
@@ -676,18 +755,48 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     # 2) 그래프
     st.markdown("#### 📊 2. 일별 예상 공급량 & 비율 그래프(평일1/평일2/주말 분리)")
 
-    w1_df = view[view["구분"] == "평일1(월·금)"]
-    w2_df = view[view["구분"] == "평일2(화·수·목)"]
-    wend_df = view[view["구분"] == "주말/공휴일"]
+    # ★ 설날/추석(명절여부=True)만 투명 처리용 마스크
+    cal_df = load_effective_calendar()
+    if cal_df is not None:
+        cal_flag = cal_df[["일자", "명절여부"]].copy()
+        plot_df = view.merge(cal_flag, on="일자", how="left")
+        plot_df["명절여부"] = plot_df["명절여부"].fillna(False).astype(bool)
+    else:
+        plot_df = view.copy()
+        plot_df["명절여부"] = False
+
+    w1_df = plot_df[plot_df["구분"] == "평일1(월·금)"]
+    w2_df = plot_df[plot_df["구분"] == "평일2(화·수·목)"]
+
+    wend_df = plot_df[plot_df["구분"] == "주말/공휴일"]
+    wend_major = wend_df[wend_df["명절여부"]].copy()      # 설날/추석(명절 True)
+    wend_other = wend_df[~wend_df["명절여부"]].copy()     # 일반 주말/공휴일
 
     fig = go.Figure()
     fig.add_bar(x=w1_df["일"], y=w1_df["예상공급량(MJ)"], name="평일1(월·금) 예상공급량(MJ)")
     fig.add_bar(x=w2_df["일"], y=w2_df["예상공급량(MJ)"], name="평일2(화·수·목) 예상공급량(MJ)")
-    fig.add_bar(x=wend_df["일"], y=wend_df["예상공급량(MJ)"], name="주말/공휴일 예상공급량(MJ)")
+
+    # 주말/공휴일(일반) - 기본 진하게
+    fig.add_bar(
+        x=wend_other["일"],
+        y=wend_other["예상공급량(MJ)"],
+        name="주말/공휴일 예상공급량(MJ)",
+        marker=dict(color="rgba(160,160,160,1.0)"),
+    )
+
+    # 설날/추석(명절) - 투명하게
+    if not wend_major.empty:
+        fig.add_bar(
+            x=wend_major["일"],
+            y=wend_major["예상공급량(MJ)"],
+            name="설날/추석(명절) 예상공급량(MJ)",
+            marker=dict(color="rgba(160,160,160,0.35)"),
+        )
+
     fig.add_trace(
         go.Scatter(
-            x=view["일"],
-            y=view["일별비율"],
+            x=plot_df["일"],
+            y=plot_df["일별비율"],
             mode="lines+markers",
             name=f"일별비율 (최근{len(used_years)}년 실제 사용)",
             yaxis="y2",
@@ -756,7 +865,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         wb = writer.book
         ws = wb[sheet_name]
 
-        # 헤더 bold
         for c in range(1, ws.max_column + 1):
             ws.cell(1, c).font = Font(bold=True)
 
@@ -772,7 +880,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # 6) 연간 다운로드(기존 유지)
+    # 6) 연간 다운로드 + 누적계획량 시트 추가
     st.markdown("#### 🗂️ 6. 일일계획 다운로드(연간)")
 
     years_plan = sorted(df_plan["연"].unique())
@@ -781,6 +889,16 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         years_plan,
         index=years_plan.index(target_year) if target_year in years_plan else 0,
         key="annual_year_select",
+    )
+
+    # ★ 누적 기준일 선택(예: 2026-01-15)
+    default_asof = dt.date(int(annual_year), 1, 15)
+    asof_date = st.date_input(
+        "누적 기준일 선택(누적계획량 시트 계산용)",
+        value=default_asof,
+        min_value=dt.date(int(annual_year), 1, 1),
+        max_value=dt.date(int(annual_year), 12, 31),
+        key="asof_date_select",
     )
 
     buffer_year = BytesIO()
@@ -806,6 +924,9 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             ws_y.cell(1, c).font = Font(bold=True)
         for c in range(1, ws_m.max_column + 1):
             ws_m.cell(1, c).font = Font(bold=True)
+
+        # ★ 마지막 시트 추가: 누적계획량 (MJ만, 자동수식)
+        _add_cumulative_plan_sheet(wb, asof_date=asof_date)
 
     st.download_button(
         label=f"📥 {annual_year}년 연간 일별공급계획 다운로드 (Excel)",
