@@ -98,14 +98,12 @@ def load_daily_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
 def _auto_find_plan_file() -> Optional[Path]:
     """
     월별 계획 파일을 폴더에서 자동 탐색.
-    - 우선순위 후보 파일명 → 없으면 폴더의 xlsx 중 '계획/plan/월별/공급' 포함 파일에서 최신 선택
     """
     base = Path(__file__).parent
 
     candidates = [
         "공급계획_월별.xlsx",
         "공급량(계획_실적).xlsx",
-        "공급량(계획_실적).xlsm",
         "공급계획.xlsx",
         "월별계획.xlsx",
         "사업계획.xlsx",
@@ -130,7 +128,6 @@ def _read_plan_excel(src, preferred_sheets: Optional[List[str]] = None) -> pd.Da
     """
     preferred_sheets = preferred_sheets or ["월별계획_실적", "월별계획", "계획", "Plan", "월별"]
 
-    # 1) 우선 sheet_name=0 시도
     try:
         df = pd.read_excel(src, sheet_name=0)
         if isinstance(df, pd.DataFrame) and not df.empty:
@@ -138,7 +135,6 @@ def _read_plan_excel(src, preferred_sheets: Optional[List[str]] = None) -> pd.Da
     except Exception:
         pass
 
-    # 2) 후보 시트명 순차 시도
     for sh in preferred_sheets:
         try:
             df = pd.read_excel(src, sheet_name=sh)
@@ -147,8 +143,121 @@ def _read_plan_excel(src, preferred_sheets: Optional[List[str]] = None) -> pd.Da
         except Exception:
             continue
 
-    # 3) 마지막 fallback
     return pd.read_excel(src)
+
+
+def _promote_first_row_to_header_if_needed(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    헤더가 2행에 있거나, Unnamed 컬럼이 대부분인 케이스 처리:
+    - 첫 행에 '연/월/계획' 같은 키워드가 보이면 첫 행을 헤더로 승격
+    """
+    if df is None or df.empty:
+        return df
+
+    cols = [str(c) for c in df.columns]
+    unnamed_ratio = np.mean([("unnamed" in c.lower()) for c in cols])
+
+    first_row = df.iloc[0].astype(str).tolist()
+    hit = sum(("연" in v or "년도" in v or "연도" in v or "월" in v or "계획" in v or "사업" in v or "plan" in v.lower()) for v in first_row)
+
+    if unnamed_ratio >= 0.5 and hit >= 2:
+        df2 = df.copy()
+        df2.columns = df2.iloc[0].astype(str)
+        df2 = df2.iloc[1:].reset_index(drop=True)
+        return df2
+
+    return df
+
+
+def _normalize_year_month_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Optional[str], Optional[str]]:
+    """
+    1) 컬럼명으로 연/월 찾기
+    2) 없으면 값 패턴(연: 1990~2100 / 월: 1~12)으로 찾기
+    """
+    df = _promote_first_row_to_header_if_needed(df)
+
+    cols = [str(c) for c in df.columns]
+
+    # 1) 이름 기반 탐색
+    year_keys = ["연도", "년도", "연", "year", "yyyy"]
+    month_keys = ["월", "month", "mm"]
+
+    year_cands = [c for c in cols if any(k in c.lower() for k in [k.lower() for k in year_keys])]
+    month_cands = [c for c in cols if any(k in c.lower() for k in [k.lower() for k in month_keys])]
+
+    year_col = None
+    month_col = None
+
+    if year_cands:
+        # '연' 단독/짧은 컬럼 우선
+        year_col = sorted(year_cands, key=lambda x: (len(x), x))[0]
+    if month_cands:
+        month_col = sorted(month_cands, key=lambda x: (len(x), x))[0]
+
+    # 2) 값 패턴 기반 탐색(이름으로 못 찾은 경우)
+    def score_year(s: pd.Series) -> float:
+        x = s.apply(to_num)
+        x = x.dropna()
+        if x.empty:
+            return 0.0
+        ok = ((x >= 1990) & (x <= 2100)).mean()
+        return float(ok)
+
+    def score_month(s: pd.Series) -> float:
+        x = s.apply(to_num)
+        x = x.dropna()
+        if x.empty:
+            return 0.0
+        ok = ((x >= 1) & (x <= 12)).mean()
+        return float(ok)
+
+    if year_col is None:
+        best = (0.0, None)
+        for c in cols:
+            sc = score_year(df[c])
+            if sc > best[0]:
+                best = (sc, c)
+        if best[0] >= 0.4:
+            year_col = best[1]
+
+    if month_col is None:
+        best = (0.0, None)
+        for c in cols:
+            sc = score_month(df[c])
+            if sc > best[0]:
+                best = (sc, c)
+        if best[0] >= 0.4:
+            month_col = best[1]
+
+    # rename
+    out = df.copy()
+    if year_col is not None and year_col != "연":
+        out = out.rename(columns={year_col: "연"})
+    if month_col is not None and month_col != "월":
+        out = out.rename(columns={month_col: "월"})
+
+    return out, year_col, month_col
+
+
+def _find_plan_col(df_plan: pd.DataFrame) -> str:
+    """
+    계획량 컬럼 자동 탐색
+    """
+    candidates = ["사업", "제출", "월별", "계획", "공급", "물량", "plan", "total", "GJ", "MJ"]
+    cols = df_plan.columns.astype(str).tolist()
+
+    for c in cols:
+        if any(k.lower() in c.lower() for k in candidates):
+            s = df_plan[c].apply(to_num)
+            if s.notna().any():
+                return c
+
+    for c in reversed(cols):
+        s = df_plan[c].apply(to_num)
+        if s.notna().any():
+            return c
+
+    return cols[-1]
 
 
 def _normalize_plan_to_mj(df_plan: pd.DataFrame, plan_col: str) -> pd.DataFrame:
@@ -166,34 +275,10 @@ def _normalize_plan_to_mj(df_plan: pd.DataFrame, plan_col: str) -> pd.DataFrame:
         return out
 
     if med >= 1e8:
-        # 이미 MJ 스케일
         return out
 
-    # GJ 스케일로 보고 MJ로 변환
     out[plan_col] = out[plan_col] * 1000.0
     return out
-
-
-def _find_plan_col(df_plan: pd.DataFrame) -> str:
-    """
-    계획량 컬럼 자동 탐색
-    """
-    candidates = ["사업", "제출", "월별", "계획", "공급", "물량", "plan", "total"]
-    cols = df_plan.columns.astype(str).tolist()
-
-    for c in cols:
-        if any(k.lower() in c.lower() for k in candidates):
-            s = df_plan[c].apply(to_num)
-            if s.notna().any():
-                return c
-
-    # fallback: 마지막 숫자형 가능 컬럼
-    for c in reversed(cols):
-        s = df_plan[c].apply(to_num)
-        if s.notna().any():
-            return c
-
-    return cols[-1]
 
 
 # ─────────────────────────────────────────────
@@ -231,7 +316,6 @@ def _add_cumulative_status_sheet(wb, annual_year: int):
     ws["A5"] = "월"
     ws["A6"] = "연"
 
-    # 연간 시트: A=일자, F=예상공급량(GJ), G=예상공급량(㎥) 기준
     ws["B4"] = '=SUMIFS(연간!$F:$F, 연간!$A:$A, $B$1)'
     ws["C4"] = '=SUMIFS(연간!$F:$F, 연간!$A:$A, $B$1)'
     ws["D4"] = '=SUMIFS(연간!$G:$G, 연간!$A:$A, $B$1)'
@@ -401,12 +485,11 @@ def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
-# 탭1 UI (여기서 FileNotFound 해결)
+# 탭1 UI
 # ─────────────────────────────────────────────
 def tab_daily_plan(df_daily: pd.DataFrame):
     st.subheader("📅 Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획")
 
-    # ✅ 계획파일: 폴더 자동탐색 + 업로드 대체
     plan_path = _auto_find_plan_file()
     uploaded = st.file_uploader(
         "월별 계획 엑셀 업로드(XLSX) (없으면 폴더에서 자동 탐색)",
@@ -422,17 +505,14 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             st.stop()
         df_plan = _read_plan_excel(plan_path)
 
-    # 컬럼 정리(연/월)
-    if "연" not in df_plan.columns:
-        for c in df_plan.columns:
-            if "연" in str(c):
-                df_plan = df_plan.rename(columns={c: "연"})
-                break
-    if "월" not in df_plan.columns:
-        for c in df_plan.columns:
-            if "월" in str(c):
-                df_plan = df_plan.rename(columns={c: "월"})
-                break
+    # ✅ 여기서 연/월 컬럼을 ‘무조건 찾도록’ 보강
+    df_plan, ycol, mcol = _normalize_year_month_columns(df_plan)
+
+    if "연" not in df_plan.columns or "월" not in df_plan.columns:
+        st.error("계획 파일에서 연/월 컬럼을 인식하지 못했어. 아래 컬럼명을 확인해줘.")
+        st.write("컬럼:", list(df_plan.columns))
+        st.dataframe(df_plan.head(20), use_container_width=True)
+        st.stop()
 
     df_plan["연"] = df_plan["연"].apply(to_num).astype("Int64")
     df_plan["월"] = df_plan["월"].apply(to_num).astype("Int64")
@@ -457,7 +537,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     with col_n:
         recent_window = st.slider("최근 몇 년 평균으로 비율을 계산할까?", 1, 10, 3, step=1)
 
-    # 학습 연도 표시
     all_years = sorted(df_daily["연도"].unique())
     hist_years = [y for y in all_years if y < int(target_year)]
     used_years = hist_years[-int(recent_window):]
@@ -466,7 +545,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     else:
         st.markdown("- 학습 연도 없음")
 
-    # 월 계획량(GJ)
     row_plan = df_plan[(df_plan["연"] == target_year) & (df_plan["월"] == target_month)]
     plan_total_mj = float(row_plan[plan_col].apply(to_num).iloc[0]) if not row_plan.empty else np.nan
     st.markdown(f"**{target_year}년 {target_month}월 사업계획 제출 공급량 합계**:  {mj_to_gj(plan_total_mj):,.0f} GJ")
@@ -480,7 +558,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         "- 마지막에 일별비율 합계가 1이 되도록 정규화(raw / SUM(raw))"
     )
 
-    # 월별 계획량(1~12) + 연간: GJ + ㎥(하단)
     st.markdown("### 📌 월별 계획량(1~12월) & 연간 총량")
     df_year_plan = df_plan[df_plan["연"] == target_year].copy()
     df_year_plan["계획_MJ"] = df_year_plan[plan_col].apply(to_num)
@@ -497,7 +574,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         df_month_show[c] = df_month_show[c].apply(lambda x: "" if pd.isna(x) else f"{x:,.0f}")
     show_table_no_index(df_month_show, height=120)
 
-    # 일별 계획 생성
     df_result, df_mat, _ = make_daily_plan_table(
         df_daily=df_daily,
         df_plan=df_plan,
@@ -526,7 +602,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     else:
         st.info("매트릭스 생성용 과거 데이터가 부족해.")
 
-    # 5) 월 다운로드 (GJ + ㎥ 포함)
     st.markdown("#### 💾 5. 일별 계획 엑셀 다운로드")
     buffer = BytesIO()
     sheet_name = f"{target_year}_{int(target_month):02d}_일별계획"
@@ -550,7 +625,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
 
 # ─────────────────────────────────────────────
-# 탭2: (너가 말한 “그대로”) 3차 다항 회귀 + 비교 + 하단 히트맵
+# 탭2: (그대로 유지) 3차 다항 회귀 + 비교 + 하단 히트맵
 # ─────────────────────────────────────────────
 def fit_poly3_and_r2(x: pd.Series, y: pd.Series):
     x = pd.Series(x).astype(float)
@@ -597,7 +672,6 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
     df_window = df_m.dropna(subset=["평균기온(℃)", "공급량(MJ)"]).copy()
     df_window["공급량_GJ"] = df_window["공급량(MJ)"].apply(mj_to_gj)
 
-    # 길이 mismatch 방지: 학습 index에만 매핑
     coef_m, y_pred_m, r2_m, idx_m = fit_poly3_and_r2(df_month["평균기온"], df_month["공급량_GJ"])
     df_month["예측공급량_GJ"] = np.nan
     if y_pred_m is not None and len(idx_m) == len(y_pred_m):
