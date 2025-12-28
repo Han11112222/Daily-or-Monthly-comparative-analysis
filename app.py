@@ -254,6 +254,7 @@ def _add_cumulative_status_sheet(wb, annual_year: int):
     sheet_name = "누적계획현황"
     if sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
+        # 기존 내용이 있으면 지우지 않고, 그대로 둠(중복 생성 방지)
         return
 
     ws = wb.create_sheet(sheet_name)
@@ -262,15 +263,18 @@ def _add_cumulative_status_sheet(wb, annual_year: int):
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     header_fill = PatternFill("solid", fgColor="F2F2F2")
 
+    # 기준일 입력 영역
     ws["A1"] = "기준일"
     ws["A1"].font = Font(bold=True)
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
 
+    # 기본값: 해당 연도 1/1 (사용자가 B1을 바꾸면 전부 자동 갱신)
     ws["B1"] = pd.Timestamp(f"{annual_year}-01-01").to_pydatetime()
     ws["B1"].number_format = "yyyy-mm-dd"
     ws["B1"].alignment = Alignment(horizontal="center", vertical="center")
     ws["B1"].font = Font(bold=True)
 
+    # 표 헤더
     headers = ["구분", "목표(GJ)", "누적(GJ)", "목표(m³)", "누적(m³)", "진행률(GJ)"]
     start_row = 3
     for j, h in enumerate(headers, start=1):
@@ -280,31 +284,39 @@ def _add_cumulative_status_sheet(wb, annual_year: int):
         c.alignment = Alignment(horizontal="center", vertical="center")
         c.border = border
 
+    # 구분 행
     rows = [("일", 4), ("월", 5), ("연", 6)]
     for label, r in rows:
         ws.cell(row=r, column=1, value=label).alignment = Alignment(horizontal="center", vertical="center")
         ws.cell(row=r, column=1).border = border
 
+    # '연간' 시트 컬럼 가정(엑셀 내):
+    # D:일자 / O:예상공급량(GJ) / P:예상공급량(㎥)
+    # (이 파일 구조는 위 코드에서 df_year_daily.to_excel로 생성되는 형태 기준)
     d = "$B$1"
 
+    # 일 목표/누적
     ws["B4"] = f'=IFERROR(XLOOKUP({d},연간!$D:$D,연간!$O:$O),"")'
     ws["C4"] = "=B4"
     ws["D4"] = f'=IFERROR(XLOOKUP({d},연간!$D:$D,연간!$P:$P),"")'
     ws["E4"] = "=D4"
     ws["F4"] = '=IFERROR(IF(B4=0,"",C4/B4),"")'
 
+    # 월 목표/누적
     ws["B5"] = f'=SUMIFS(연간!$O:$O,연간!$A:$A,YEAR({d}),연간!$B:$B,MONTH({d}))'
     ws["C5"] = f'=SUMIFS(연간!$O:$O,연간!$D:$D,">="&EOMONTH({d},-1)+1,연간!$D:$D,"<="&{d})'
     ws["D5"] = f'=SUMIFS(연간!$P:$P,연간!$A:$A,YEAR({d}),연간!$B:$B,MONTH({d}))'
     ws["E5"] = f'=SUMIFS(연간!$P:$P,연간!$D:$D,">="&EOMONTH({d},-1)+1,연간!$D:$D,"<="&{d})'
     ws["F5"] = '=IFERROR(IF(B5=0,"",C5/B5),"")'
 
+    # 연 목표/누적
     ws["B6"] = f'=SUMIFS(연간!$O:$O,연간!$A:$A,YEAR({d}))'
     ws["C6"] = f'=SUMIFS(연간!$O:$O,연간!$D:$D,">="&DATE(YEAR({d}),1,1),연간!$D:$D,"<="&{d})'
     ws["D6"] = f'=SUMIFS(연간!$P:$P,연간!$A:$A,YEAR({d}))'
     ws["E6"] = f'=SUMIFS(연간!$P:$P,연간!$D:$D,">="&DATE(YEAR({d}),1,1),연간!$D:$D,"<="&{d})'
     ws["F6"] = '=IFERROR(IF(B6=0,"",C6/B6),"")'
 
+    # 서식(숫자/퍼센트/정렬/테두리)
     for r in range(4, 7):
         for c in range(2, 6):  # B~E
             cell = ws.cell(row=r, column=c)
@@ -317,10 +329,12 @@ def _add_cumulative_status_sheet(wb, annual_year: int):
         pct.alignment = Alignment(horizontal="center", vertical="center")
         pct.border = border
 
+    # A열 헤더~표 테두리
     for r in range(start_row, 7):
         ws.cell(row=r, column=1).border = border
         ws.cell(row=r, column=1).alignment = Alignment(horizontal="center", vertical="center")
 
+    # 컬럼 폭
     ws.column_dimensions["A"].width = 10
     ws.column_dimensions["B"].width = 16
     ws.column_dimensions["C"].width = 16
@@ -328,6 +342,7 @@ def _add_cumulative_status_sheet(wb, annual_year: int):
     ws.column_dimensions["E"].width = 16
     ws.column_dimensions["F"].width = 14
 
+    # 보기 좋게
     ws.freeze_panes = "A4"
 
 
@@ -713,152 +728,6 @@ def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
-# (추가) 기온 히트맵용 유틸
-# ─────────────────────────────────────────────
-def _normalize_temp_input(df_in: pd.DataFrame) -> pd.DataFrame | None:
-    """
-    업로드된 기온 파일을 최대한 자동으로 맞춰서
-    ['일자','평균기온(℃)','연도','월','일'] 형태로 반환
-    """
-    df = df_in.copy()
-
-    # 날짜 컬럼 찾기
-    date_candidates = ["일자", "날짜", "DATE", "Date"]
-    date_col = next((c for c in date_candidates if c in df.columns), None)
-    if date_col is None:
-        return None
-
-    # 기온 컬럼 찾기
-    temp_candidates = ["평균기온(℃)", "평균기온", "기온", "TAVG", "AvgTemp"]
-    temp_col = next((c for c in temp_candidates if c in df.columns), None)
-    if temp_col is None:
-        # 숫자 컬럼 중 하나를 기온으로 가정(최후수단)
-        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        if not num_cols:
-            return None
-        temp_col = num_cols[0]
-
-    # 날짜 파싱(yyyy-mm-dd / yyyymmdd 모두 대응)
-    s = df[date_col]
-    if pd.api.types.is_datetime64_any_dtype(s):
-        dt = pd.to_datetime(s)
-    else:
-        s2 = s.astype(str).str.strip()
-        dt = pd.to_datetime(s2, errors="coerce")
-        # yyyymmdd 보정
-        if dt.isna().mean() > 0.5:
-            dt = pd.to_datetime(s2, format="%Y%m%d", errors="coerce")
-
-    out = pd.DataFrame({
-        "일자": dt,
-        "평균기온(℃)": pd.to_numeric(df[temp_col], errors="coerce")
-    }).dropna(subset=["일자"]).copy()
-
-    out["연도"] = out["일자"].dt.year
-    out["월"] = out["일자"].dt.month
-    out["일"] = out["일자"].dt.day
-    return out
-
-
-def _render_daily_temp_heatmap(df_temp_all: pd.DataFrame):
-    st.subheader("🧊 G. 기온분석 — 일일 평균기온 히트맵")
-    st.caption("기본은 공급량 데이터에 포함된 평균기온(℃)을 사용하고, 필요하면 별도 기온 파일(XLSX)도 업로드해서 볼 수 있어.")
-
-    up = st.file_uploader(
-        "일일기온 파일 업로드(XLSX) (선택)",
-        type=["xlsx"],
-        key="temp_heatmap_uploader",
-        help="권장 컬럼 예시: [일자] / [평균기온(℃)] (또는 날짜/기온 계열 유사 컬럼)",
-    )
-
-    df_temp_src = df_temp_all.copy()
-    if up is not None:
-        try:
-            tmp = pd.read_excel(up)
-            norm = _normalize_temp_input(tmp)
-            if norm is None or norm.empty:
-                st.warning("업로드 파일에서 날짜/기온 컬럼을 찾지 못해서 기본 기온 데이터로 표시할게.")
-            else:
-                df_temp_src = norm
-        except Exception:
-            st.warning("업로드 파일을 읽는 중 오류가 있어서 기본 기온 데이터로 표시할게.")
-
-    if df_temp_src.empty:
-        st.caption("표시할 기온 데이터가 없어.")
-        return
-
-    min_y = int(df_temp_src["연도"].min())
-    max_y = int(df_temp_src["연도"].max())
-
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        y0, y1 = st.slider(
-            "연도 범위",
-            min_value=min_y,
-            max_value=max_y,
-            value=(min_y, max_y),
-            step=1,
-            key="temp_year_slider",
-        )
-    with col2:
-        m = st.selectbox(
-            "월 선택",
-            list(range(1, 13)),
-            index=0,
-            format_func=lambda x: f"{x:02d} (January)" if x == 1 else f"{x:02d}",
-            key="temp_month_select",
-        )
-
-    dfm = df_temp_src[df_temp_src["연도"].between(y0, y1) & (df_temp_src["월"] == m)].copy()
-    years = sorted(dfm["연도"].unique().tolist())
-    if not years:
-        st.caption("선택 구간에 기온 데이터가 없어.")
-        return
-
-    # 1~31 고정(월별 비교용)
-    day_index = list(range(1, 32))
-    pv = (
-        dfm.pivot_table(index="일", columns="연도", values="평균기온(℃)", aggfunc="mean")
-        .reindex(day_index)
-        .reindex(columns=years)
-    )
-
-    col_mean = pv.mean(axis=0, skipna=True)
-    pv2 = pd.concat([pd.DataFrame([col_mean], index=["평균"]), pv], axis=0)
-
-    # 표시 순서: 평균, 31..01
-    pv2 = pv2.loc[["평균"] + day_index[::-1]]
-
-    y_labels = ["평균"] + [f"{d:02d}" for d in day_index[::-1]]
-    x_labels = [str(y) for y in pv2.columns]
-
-    z = pv2.values
-    text = np.where(np.isnan(z), "", np.vectorize(lambda v: f"{v:.1f}")(z))
-
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=z,
-            x=x_labels,
-            y=y_labels,
-            colorscale="RdBu_r",
-            zmid=0,
-            colorbar=dict(title="℃"),
-            text=text,
-            texttemplate="%{text}",
-            textfont=dict(size=10),
-        )
-    )
-    fig.update_layout(
-        title=f"{m:02d}월 일일 평균기온 히트맵(선택연도 {len(x_labels)}개)",
-        xaxis=dict(title="연도", side="top", type="category"),
-        yaxis=dict(title="Day", autorange="reversed"),
-        margin=dict(l=60, r=30, t=80, b=40),
-        height=700,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-# ─────────────────────────────────────────────
 # 탭1: Daily 공급량 분석
 # ─────────────────────────────────────────────
 def tab_daily_plan(df_daily: pd.DataFrame):
@@ -1106,6 +975,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         for c in range(1, ws_m.max_column + 1):
             ws_m.cell(1, c).font = Font(bold=True)
 
+        # ✅ 요청한 부분: 마지막 시트 추가(기준일 입력 → 목표/누적 자동 계산)
         _add_cumulative_status_sheet(wb, annual_year=int(annual_year))
 
     st.download_button(
@@ -1152,17 +1022,16 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
                     textfont=dict(size=10, color="black"),
                 )
             )
-            # ✅ 요청사항: 정사각형(셀 비율 포함)으로 보이도록 고정
             fig_corr.update_layout(
                 xaxis_title="변수",
                 yaxis_title="변수",
-                xaxis=dict(side="top", tickangle=45, constrain="domain"),
-                yaxis=dict(autorange="reversed", scaleanchor="x", scaleratio=1),
-                width=700,
-                height=700,
-                margin=dict(l=90, r=30, t=90, b=90),
+                xaxis=dict(side="top", tickangle=45),
+                yaxis=dict(autorange="reversed"),
+                width=600,
+                height=600,
+                margin=dict(l=80, r=20, t=80, b=80),
             )
-            st.plotly_chart(fig_corr, use_container_width=False)
+            st.plotly_chart(fig_corr, use_container_width=True)
         else:
             st.caption("숫자 컬럼이 2개 미만이라 상관도 분석을 할 수 없어.")
 
@@ -1231,10 +1100,6 @@ def tab_daily_monthly_compare(df: pd.DataFrame, df_temp_all: pd.DataFrame):
                 x_label="일평균 기온 (℃)", y_label="일별 공급량 (GJ)"
             )
             st.plotly_chart(fig_d, use_container_width=True)
-
-    # ✅ 요청사항: 2번째 탭 가장 하단에 "일일 평균기온 히트맵" 추가
-    st.divider()
-    _render_daily_temp_heatmap(df_temp_all=df_temp_all)
 
 
 # ─────────────────────────────────────────────
