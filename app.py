@@ -1,5 +1,4 @@
 import calendar
-import os
 from io import BytesIO
 from pathlib import Path
 
@@ -8,353 +7,580 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
-from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
 
-# ─────────────────────────────────────────────
-# 1. 기본 설정 및 파일 자동 탐색기
-# ─────────────────────────────────────────────
-st.set_page_config(page_title="도시가스 공급량 예측 시스템", layout="wide")
+# =========================================================
+# 단위/환산
+# =========================================================
+MJ_PER_NM3 = 42.563  # MJ/Nm3
+MJ_TO_GJ = 0.001     # 1 MJ = 0.001 GJ
 
-def find_repo_file(filename_candidates):
-    """현재 폴더와 상위 폴더를 뒤져서 파일을 찾아냅니다."""
-    search_dirs = [Path(__file__).parent, Path.cwd()]
-    for folder in search_dirs:
-        for name in filename_candidates:
-            target = folder / name
-            if target.exists():
-                return target
-    return None
 
-# ─────────────────────────────────────────────
-# 2. 단위 변환
-# ─────────────────────────────────────────────
-MJ_PER_NM3 = 42.563
-MJ_TO_GJ = 0.001
+def mj_to_gj(mj: float) -> float:
+    try:
+        return float(mj) * MJ_TO_GJ
+    except Exception:
+        return np.nan
 
-def mj_to_gj(mj):
-    try: return float(mj) * MJ_TO_GJ
-    except: return np.nan
 
-def gj_to_mj(gj):
-    try: return float(gj) / MJ_TO_GJ
-    except: return np.nan
+def gj_to_mj(gj: float) -> float:
+    try:
+        return float(gj) / MJ_TO_GJ
+    except Exception:
+        return np.nan
 
-def mj_to_m3(mj):
-    try: return float(mj) / MJ_PER_NM3
-    except: return np.nan
 
-def gj_to_m3(gj):
-    try: return mj_to_m3(gj_to_mj(gj))
-    except: return np.nan
+def mj_to_m3(mj: float) -> float:
+    # MJ / (MJ/Nm3) = Nm3
+    try:
+        return float(mj) / MJ_PER_NM3
+    except Exception:
+        return np.nan
 
-# ─────────────────────────────────────────────
-# 3. 데이터 로딩 (형님 파일 구조에 맞춤)
-# ─────────────────────────────────────────────
+
+def gj_to_m3(gj: float) -> float:
+    # GJ -> MJ -> Nm3
+    try:
+        return mj_to_m3(gj_to_mj(gj))
+    except Exception:
+        return np.nan
+
+
+# =========================================================
+# 데이터 로딩
+# =========================================================
 @st.cache_data(show_spinner=False)
-def load_monthly_plan(uploaded_file):
-    """월별 계획 로딩: '공급량(계획_실적).xlsx' 자동 인식"""
-    df = None
-    # 1. 업로드 확인
-    if uploaded_file:
-        try: df = pd.read_excel(uploaded_file)
-        except: pass
-    
-    # 2. 자동 탐색 (형님 파일명 우선)
-    if df is None:
-        candidates = ["공급량(계획_실적).xlsx", "월별계획.xlsx", "월별 계획.xlsx"]
-        file_path = find_repo_file(candidates)
-        if file_path:
-            try: df = pd.read_excel(file_path)
-            except: pass
-            
-    if df is None: return None
+def load_monthly_plan(uploaded_file) -> pd.DataFrame:
+    """
+    월별 계획(1~12월 + 연간합계)을 읽어오는 함수
+    - 업로드 파일이 없으면 repo 내 '월별계획.xlsx'를 찾음
+    """
+    if uploaded_file is not None:
+        excel_path = uploaded_file
+    else:
+        # repo 기본 파일 (있으면 자동탐색)
+        excel_path = Path(__file__).parent / "월별계획.xlsx"
+        if not excel_path.exists():
+            raise FileNotFoundError("월별 계획 파일을 찾지 못했어. 업로드하거나 repo에 '월별계획.xlsx'를 넣어줘.")
 
-    # 컬럼명 정리 (공백 제거)
-    df.columns = [str(c).strip().replace(" ", "") for c in df.columns]
-    
-    # '연' -> '연도'로 통일 (코드 내 일관성을 위해)
-    if "연" in df.columns and "연도" not in df.columns:
-        df = df.rename(columns={"연": "연도"})
-        
+    df = pd.read_excel(excel_path)
+
+    # 컬럼 표준화(가능한 포맷 다양성 대응)
+    # 기대: 구분 + 1~12월 + 연간합계
+    # 구분 컬럼명이 다를 수 있으니 유연 처리
+    col_map = {}
+    for c in df.columns:
+        cs = str(c).strip()
+        if cs in ["구분", "항목", "분류"]:
+            col_map[c] = "구분"
+    df = df.rename(columns=col_map)
+
+    # 월 컬럼 정리
+    month_cols = []
+    for m in range(1, 13):
+        for cand in [f"{m}월", str(m), f"{m:02d}"]:
+            if cand in df.columns:
+                month_cols.append(cand)
+                break
+
+    # 연간합계 컬럼
+    annual_col = None
+    for cand in ["연간합계", "연간", "합계", "Total", "TOTAL"]:
+        if cand in df.columns:
+            annual_col = cand
+            break
+
+    # 수치 변환
+    for c in month_cols + ([annual_col] if annual_col else []):
+        if c is None:
+            continue
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
     return df
 
-@st.cache_data(show_spinner=False)
-def load_daily_data(uploaded_file_daily):
-    """일일 실적 로딩: '공급량(일일실적).xlsx' 자동 인식"""
-    df_raw = None
-    if uploaded_file_daily:
-        try: df_raw = pd.read_excel(uploaded_file_daily)
-        except: pass
-        
-    if df_raw is None:
-        candidates = ["공급량(일일실적).xlsx", "일일실적.xlsx"]
-        file_path = find_repo_file(candidates)
-        if file_path:
-            try: df_raw = pd.read_excel(file_path)
-            except: pass
-            
-    if df_raw is None: return None
 
-    # 컬럼 매핑
+@st.cache_data(show_spinner=False)
+def load_daily_data(uploaded_file_daily) -> pd.DataFrame:
+    """
+    일일 실적(공급량 MJ/GJ 등) 로딩.
+    - 업로드가 있으면 사용
+    - 없으면 repo 내 '공급량(일일실적).xlsx' 시도
+    """
+    if uploaded_file_daily is not None:
+        excel_path = uploaded_file_daily
+    else:
+        excel_path = Path(__file__).parent / "공급량(일일실적).xlsx"
+        if not excel_path.exists():
+            raise FileNotFoundError("일일 실적 파일을 찾지 못했어. 업로드하거나 repo에 '공급량(일일실적).xlsx'를 넣어줘.")
+
+    df_raw = pd.read_excel(excel_path)
+
+    # 가능한 컬럼명 대응
+    # 최소: 일자 + 공급량(MJ) or 공급량(GJ) + 평균기온(선택)
     col_std = {}
     for c in df_raw.columns:
-        cs = str(c).strip().replace(" ", "")
-        if cs in ["일자", "date", "Date"]: col_std[c] = "일자"
-        if "공급량" in cs and "MJ" in cs: col_std[c] = "공급량(MJ)"
-        if "평균" in cs and ("기온" in cs or "온도" in cs): col_std[c] = "평균기온(°C)"
-    
+        cs = str(c).strip()
+        if cs in ["일자", "date", "Date"]:
+            col_std[c] = "일자"
+        if "공급량" in cs and "MJ" in cs:
+            col_std[c] = "공급량(MJ)"
+        if "공급량" in cs and ("GJ" in cs or "Gj" in cs):
+            col_std[c] = "공급량(GJ)"
+        if "평균" in cs and ("기온" in cs or "온도" in cs):
+            col_std[c] = "평균기온(°C)"
+        if "최저" in cs and ("기온" in cs or "온도" in cs):
+            col_std[c] = "최저기온(°C)"
+        if "최고" in cs and ("기온" in cs or "온도" in cs):
+            col_std[c] = "최고기온(°C)"
+        if "체감" in cs and ("기온" in cs or "온도" in cs):
+            col_std[c] = "체감온도(°C)"
+
     df = df_raw.rename(columns=col_std).copy()
 
-    if "일자" not in df.columns: return None
-    
-    df["일자"] = pd.to_datetime(df["일자"], errors="coerce")
-    df = df.dropna(subset=["일자"])
+    # 일자
+    if "일자" in df.columns:
+        df["일자"] = pd.to_datetime(df["일자"], errors="coerce")
+    else:
+        raise KeyError("일일 실적 파일에 '일자' 컬럼이 없어.")
 
-    # 공급량 숫자 변환
+    # 공급량 정리: MJ 우선, 없으면 GJ -> MJ 환산
+    if "공급량(MJ)" not in df.columns and "공급량(GJ)" in df.columns:
+        df["공급량(MJ)"] = df["공급량(GJ)"].apply(gj_to_mj)
+
     if "공급량(MJ)" in df.columns:
         df["공급량(MJ)"] = pd.to_numeric(df["공급량(MJ)"], errors="coerce")
 
-    # 파생 변수
-    df["연도"] = df["일자"].dt.year # 여기서 '연도' 컬럼 생성
+    # 파생
+    df["연"] = df["일자"].dt.year
     df["월"] = df["일자"].dt.month
     df["일"] = df["일자"].dt.day
     df["요일"] = df["일자"].dt.day_name()
 
     return df
 
-# ─────────────────────────────────────────────
-# 4. 분석 로직 (형님 원본 로직)
-# ─────────────────────────────────────────────
-def nth_weekday_of_month(dt):
+
+# =========================================================
+# 일별 계획 산출 로직
+# =========================================================
+def nth_weekday_of_month(dt: pd.Timestamp) -> int:
+    """해당 일자가 그 달의 'n번째 같은 요일'인지 계산 (1부터 시작)"""
     first = dt.replace(day=1)
+    # 같은 요일이 몇 번 지났는지
     n = 1
     cur = first
     while cur < dt:
         cur += pd.Timedelta(days=1)
-        if cur.day_name() == dt.day_name(): n += 1
+        if cur.day_name() == dt.day_name():
+            n += 1
     return n
 
-def make_daily_plan_table(df_daily, target_year, target_month, monthly_total_gj, n_years=3):
-    # 학습 연도 후보 (직전 n개년)
+
+def make_daily_plan_table(
+    df_daily: pd.DataFrame,
+    target_year: int,
+    target_month: int,
+    monthly_total_gj: float,
+    n_years: int = 3,
+) -> tuple[pd.DataFrame, list[int]]:
+    """
+    최근 n년(해당월 실적 있는 연도만) 패턴으로 일별 비율을 만들고,
+    월 계획량(GJ)에 곱해서 target년월 일별 예상공급량을 산출.
+    반환: (df_plan, used_years)
+      df_plan 컬럼:
+        - 일자, 연, 월, 일, 요일, 요일구분(평일1/평일2/주말/공휴일), 기준키, 일별비율, 예상공급량(MJ)
+    """
+    # 학습연도 후보: target_year-1, -2, ...
     cand_years = list(range(target_year - 1, target_year - 1 - n_years * 3, -1))
     used_years = []
     df_hist = []
 
     for y in cand_years:
-        # '연도' 컬럼 사용 (위에서 통일함)
-        sub = df_daily[(df_daily["연도"] == y) & (df_daily["월"] == target_month)].copy()
-        if not sub.empty and sub["공급량(MJ)"].sum() > 0:
+        sub = df_daily[(df_daily["연"] == y) & (df_daily["월"] == target_month)].copy()
+        if sub["공급량(MJ)"].notna().sum() > 0:
             used_years.append(y)
             df_hist.append(sub)
         if len(used_years) >= n_years:
             break
 
-    if not df_hist: return None, []
+    if len(df_hist) == 0:
+        raise ValueError("학습에 사용할 과거 연도가 없어(해당월 실적 존재 연도 0).")
 
     df_hist = pd.concat(df_hist, ignore_index=True)
 
-    def weekday_group(dname):
-        return "주말" if dname in ["Saturday", "Sunday"] else "평일1" if dname in ["Monday", "Friday"] else "평일2"
+    # 요일구분: 평일1(월/금), 평일2(화/수/목), 주말(토/일)
+    def weekday_group(dname: str) -> str:
+        if dname in ["Saturday", "Sunday"]:
+            return "주말"
+        if dname in ["Monday", "Friday"]:
+            return "평일1"
+        return "평일2"
 
     df_hist["요일구분"] = df_hist["요일"].apply(weekday_group)
     df_hist["n번째"] = df_hist["일자"].apply(nth_weekday_of_month)
-    df_hist["기준키"] = df_hist.apply(lambda r: f"{'주말' if r['요일구분']=='주말' else r['요일']}-{r['n번째']}", axis=1)
 
-    # 비율 계산
+    # 기준키: 주말은 '주말-n번째', 평일은 '요일명-n번째'
+    def make_key(row) -> str:
+        if row["요일구분"] == "주말":
+            return f"주말-{row['n번째']}"
+        return f"{row['요일']}-{row['n번째']}"
+
+    df_hist["기준키"] = df_hist.apply(make_key, axis=1)
+
+    # 과거 일별비율(해당월 합계로 정규화)
+    # - 연도별 비율 -> 평균
     ratios = []
     for y in used_years:
-        sub = df_hist[df_hist["연도"] == y].copy()
+        sub = df_hist[df_hist["연"] == y].copy()
         s = sub["공급량(MJ)"].sum()
         sub["비율"] = sub["공급량(MJ)"] / s if s != 0 else np.nan
         ratios.append(sub[["기준키", "비율"]].groupby("기준키")["비율"].mean())
 
+    # 평균 비율
     ratio_mean = pd.concat(ratios, axis=1).mean(axis=1)
-    if ratio_mean.sum() > 0: ratio_mean /= ratio_mean.sum()
+    ratio_mean = ratio_mean / ratio_mean.sum()  # 합 1로 재정규화
 
-    # 타겟 월 달력 생성
+    # 타겟 월 달력
     days_in_month = calendar.monthrange(target_year, target_month)[1]
     dates = pd.date_range(start=f"{target_year}-{target_month:02d}-01", periods=days_in_month, freq="D")
     df_plan = pd.DataFrame({"일자": dates})
-    df_plan["연도"] = df_plan["일자"].dt.year
+    df_plan["연"] = df_plan["일자"].dt.year
     df_plan["월"] = df_plan["일자"].dt.month
     df_plan["일"] = df_plan["일자"].dt.day
     df_plan["요일"] = df_plan["일자"].dt.day_name()
     df_plan["요일구분"] = df_plan["요일"].apply(weekday_group)
     df_plan["n번째"] = df_plan["일자"].apply(nth_weekday_of_month)
-    df_plan["기준키"] = df_plan.apply(lambda r: f"{'주말' if r['요일구분']=='주말' else r['요일']}-{r['n번째']}", axis=1)
+    df_plan["기준키"] = df_plan.apply(make_key, axis=1)
 
-    # 비율 매핑
+    # 키가 없으면 요일평균으로 보정(기존 로직 유지)
+    # 1) 기준키로 매핑
     df_plan["일별비율"] = df_plan["기준키"].map(ratio_mean)
-    
-    # 결측치 보정
+
+    # 2) 기준키가 NaN인 경우: 요일 평균(과거)
     if df_plan["일별비율"].isna().any():
-        weekday_ratio = df_hist.assign(비율=df_hist["공급량(MJ)"]/df_hist.groupby("연도")["공급량(MJ)"].transform("sum")).groupby("요일")["비율"].mean()
-        df_plan.loc[df_plan["일별비율"].isna(), "일별비율"] = df_plan.loc[df_plan["일별비율"].isna(), "요일"].map(weekday_ratio)
+        weekday_ratio = (
+            df_hist.assign(비율=df_hist["공급량(MJ)"] / df_hist.groupby("연")["공급량(MJ)"].transform("sum"))
+            .groupby("요일")["비율"]
+            .mean()
+        )
+        df_plan.loc[df_plan["일별비율"].isna(), "일별비율"] = df_plan.loc[df_plan["일별비율"].isna(), "요일"].map(
+            weekday_ratio
+        )
 
-    df_plan["일별비율"] = df_plan["일별비율"].fillna(1/len(df_plan))
-    if df_plan["일별비율"].sum() > 0:
-        df_plan["일별비율"] /= df_plan["일별비율"].sum()
+    # 마지막 정규화
+    df_plan["일별비율"] = df_plan["일별비율"] / df_plan["일별비율"].sum()
 
-    # 계획량 반영 (GJ -> MJ)
+    # 월 계획량(GJ) -> MJ로 바꿔서 일별 MJ 산출
     monthly_total_mj = gj_to_mj(monthly_total_gj)
     df_plan["예상공급량(MJ)"] = df_plan["일별비율"] * monthly_total_mj
 
+    # 표시용 정렬
+    df_plan = df_plan[
+        ["일자", "요일", "요일구분", "n번째", "기준키", "일별비율", "예상공급량(MJ)", "연", "월", "일"]
+    ].copy()
+
     return df_plan, used_years
 
-# ─────────────────────────────────────────────
-# 5. 엑셀 다운로드 (누적현황 기능 포함)
-# ─────────────────────────────────────────────
-def _add_cumulative_sheet(wb, target_year):
-    if "누적계획현황" in wb.sheetnames: return
-    ws = wb.create_sheet("누적계획현황")
-    thin = Side(style="thin", color="999999")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    fill = PatternFill("solid", fgColor="F2F2F2")
-    ws["A1"] = "기준일"; ws["B1"] = f"{target_year}-01-01"
-    
-    headers = ["구분", "목표(GJ)", "누적(GJ)", "목표(m³)", "누적(m³)", "진행률"]
-    for i, h in enumerate(headers, 1):
-        c = ws.cell(3, i, h)
-        c.fill = fill; c.border = border; c.alignment = Alignment("center")
-        
-    d = "$B$1"
-    ws["B4"] = f'=IFERROR(XLOOKUP({d},연간!$A:$A,연간!$F:$F),"")' 
-    ws["C4"] = "=B4"
-    ws["F4"] = '=IFERROR(IF(B4=0,"",C4/B4),"")'
-    for r in range(4, 7):
-        for c in range(1, 7): ws.cell(r, c).border = border
 
-def export_excel(df_plan, sheet_name="일일계획", annual=False, year=None):
+# =========================================================
+# 다운로드(엑셀)
+# =========================================================
+def export_daily_plan_excel(df_plan: pd.DataFrame, sheet_name: str = "일일계획") -> bytes:
     out = BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        # 저장은 GJ + ㎥ 둘다 넣기
         df_x = df_plan.copy()
         df_x["예상공급량(GJ)"] = df_x["예상공급량(MJ)"].apply(mj_to_gj)
         df_x["예상공급량(㎥)"] = df_x["예상공급량(MJ)"].apply(mj_to_m3)
+        # 보기 편하게 컬럼 순서 조정
         cols = ["일자", "요일", "요일구분", "n번째", "기준키", "일별비율", "예상공급량(GJ)", "예상공급량(㎥)"]
-        
-        if annual:
-            df_x.to_excel(writer, sheet_name="연간", index=False)
-            if year: _add_cumulative_sheet(writer.book, year)
-        else:
-            df_x[cols].to_excel(writer, sheet_name=sheet_name, index=False)
+        df_x[cols].to_excel(writer, sheet_name=sheet_name, index=False)
+
     return out.getvalue()
 
-# ─────────────────────────────────────────────
-# 6. 메인 앱 (UI)
-# ─────────────────────────────────────────────
-def main():
-    st.sidebar.title("데이터 로드")
-    up_daily = st.sidebar.file_uploader("일일 실적(선택)", type=["xlsx"], key="daily")
-    
-    # 1. 일일 데이터 로드 (자동 탐색)
-    df_daily = load_daily_data(up_daily)
-    
-    if df_daily is None:
-        st.warning("⚠️ '공급량(일일실적).xlsx' 파일을 찾을 수 없습니다. 깃허브에 파일이 있는지 확인해주세요.")
+
+# =========================================================
+# 탭1: Daily 공급량 분석
+# =========================================================
+def tab_daily_plan(df_daily: pd.DataFrame):
+    st.title("도시가스 공급량 - 일별계획 예측")
+    st.subheader("🗓️ Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획")
+
+    st.markdown("### 📁 1. 월별계획 엑셀 업로드(XLSX) (없으면 폴더에서 자동 탐색)")
+    uploaded_plan = st.file_uploader("월별 계획 엑셀 업로드", type=["xlsx"], key="plan_upload")
+
+    try:
+        df_plan_month = load_monthly_plan(uploaded_plan)
+    except Exception as e:
+        st.error(str(e))
         return
 
-    tab = st.sidebar.radio("메뉴", ["Daily 공급량 분석", "Daily·Monthly 비교"])
+    # 연도/월 선택
+    st.markdown("### ⚙️ 2. 계획 연도/월 및 학습기간 설정")
+    years = sorted(df_daily["연"].dropna().unique().astype(int).tolist())
+    default_year = max(years) + 1 if len(years) > 0 else 2026
+    target_year = st.selectbox("계획 연도 선택", options=list(range(default_year - 5, default_year + 3)), index=5)
+    target_month = st.selectbox("계획 월 선택", options=list(range(1, 13)), index=0)
 
-    # --- 탭 1 ---
-    if tab == "Daily 공급량 분석":
-        st.title("🏙️ 도시가스 공급량 - 일별계획 예측")
-        up_plan = st.sidebar.file_uploader("월별 계획(선택)", type=["xlsx"], key="plan")
-        df_plan = load_monthly_plan(up_plan)
-        
-        if df_plan is None:
-            st.warning("⚠️ '공급량(계획_실적).xlsx' 파일을 찾을 수 없습니다.")
-            return
+    n_years = st.slider("최근 몇 년 평균으로 비율을 계산할까?", min_value=1, max_value=5, value=3, step=1)
 
-        # 2. 연도 선택 (★일일 실적 파일 기준★ - KeyError 해결)
-        years = sorted(df_daily["연도"].unique())
-        default_year = max(years) + 1 if years else 2026
-        
-        c1, c2, c3 = st.columns(3)
-        with c1: t_year = st.selectbox("계획 연도", range(default_year-5, default_year+3), index=5)
-        with c2: t_month = st.selectbox("계획 월", range(1, 13))
-        with c3: n_yrs = st.slider("학습 기간", 1, 5, 3)
-
-        # 3. 월 계획량 추출 (★형님 파일 구조: 연도, 월, 계획값★)
-        # 파일에 '연도'와 '월' 컬럼이 있으면 해당 행을 찾음
-        target_row = pd.DataFrame()
-        if "연도" in df_plan.columns and "월" in df_plan.columns:
-            target_row = df_plan[(df_plan["연도"] == t_year) & (df_plan["월"] == t_month)]
-        
-        if target_row.empty:
-            st.error(f"{t_year}년 {t_month}월 계획 데이터를 찾을 수 없습니다.")
-            return
-        
-        # '계획'이라는 글자가 들어간 컬럼 찾기 (사업계획제출_MJ 등)
-        val_col = next((c for c in df_plan.columns if "계획" in c), None)
-        if not val_col:
-            # 계획 컬럼이 없으면 3번째 컬럼(숫자일 확률 높음)을 사용
-            val_col = df_plan.columns[2] if len(df_plan.columns) > 2 else None
-
-        if val_col:
-            m_total_gj = float(target_row.iloc[0][val_col])
-            # MJ 단위면 GJ로 변환 (숫자가 크면 MJ로 간주)
-            if m_total_gj > 1000000: m_total_gj = mj_to_gj(m_total_gj)
+    # 월 계획량 추출(구분 row가 1개인 전제: '사업계획(월별 계획)' 같은 첫 행)
+    # - MJ->GJ로 이미 바뀐 환경이므로, 여기서는 plan을 'GJ'로 해석(현재 앱 UI 기준)
+    # - 파일에 있는 숫자가 GJ 단위라고 가정(기존 사용자 운영 방식 유지)
+    # 월컬럼 후보
+    month_col = f"{target_month}월" if f"{target_month}월" in df_plan_month.columns else None
+    if month_col is None:
+        # fallback: '1','2' 등
+        if str(target_month) in df_plan_month.columns:
+            month_col = str(target_month)
+        elif f"{target_month:02d}" in df_plan_month.columns:
+            month_col = f"{target_month:02d}"
         else:
-            st.error("계획량 컬럼을 찾을 수 없습니다.")
+            st.error(f"월별계획 파일에서 {target_month}월 컬럼을 못 찾았어.")
             return
 
-        st.info(f"**{t_year}년 {t_month}월 목표**: {m_total_gj:,.0f} GJ")
+    # 첫 행을 월계획으로 사용
+    monthly_total_gj = float(df_plan_month.loc[0, month_col])
 
-        # 4. 분석 실행
-        df_res, used_yrs = make_daily_plan_table(df_daily, t_year, t_month, m_total_gj, n_yrs)
-        
-        if df_res is not None:
-            st.success(f"✅ 학습 연도: {used_yrs}")
-            
-            # 차트
-            fig = go.Figure()
-            y_gj = df_res["예상공급량(MJ)"].apply(mj_to_gj)
-            fig.add_trace(go.Bar(x=df_res["일"], y=y_gj, name="예상(GJ)"))
-            fig.add_trace(go.Scatter(x=df_res["일"], y=df_res["일별비율"], name="비율", yaxis="y2", line=dict(color='red')))
-            fig.update_layout(yaxis2=dict(overlaying="y", side="right"), title=f"{t_year}년 {t_month}월 예측")
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # 테이블
-            st.dataframe(df_res[["일자", "요일", "일별비율", "예상공급량(MJ)"]].style.format({"일별비율": "{:.2%}"}), use_container_width=True)
-            
-            # 다운로드
-            c_d1, c_d2 = st.columns(2)
-            c_d1.download_button("📥 월간 다운로드", export_excel(df_res, f"{t_month}월"), f"Plan_{t_year}_{t_month}.xlsx")
-            
-            if c_d2.button("📥 연간 전체 생성"):
-                all_dfs = []
-                for m in range(1, 13):
-                    t_row = df_plan[(df_plan["연도"] == t_year) & (df_plan["월"] == m)]
-                    if not t_row.empty:
-                        mgj = float(t_row.iloc[0][val_col])
-                        if mgj > 1000000: mgj = mj_to_gj(mgj)
-                        d, _ = make_daily_plan_table(df_daily, t_year, m, mgj, n_yrs)
-                        if d is not None: all_dfs.append(d)
-                
-                if all_dfs:
-                    full_df = pd.concat(all_dfs, ignore_index=True)
-                    st.download_button("📥 파일 저장", export_excel(full_df, annual=True, year=t_year), f"Annual_{t_year}.xlsx")
+    st.info(
+        f"최근 {n_years}년 후보({target_year-n_years}년~{target_year-1}년) 중 {target_month}월 실적이 있는 연도만 자동 선택해서 학습해."
+    )
 
+    # 계획 산출
+    try:
+        df_plan, used_years = make_daily_plan_table(
+            df_daily=df_daily,
+            target_year=target_year,
+            target_month=target_month,
+            monthly_total_gj=monthly_total_gj,
+            n_years=n_years,
+        )
+    except Exception as e:
+        st.error(str(e))
+        return
+
+    st.markdown(f"- **실제 학습에 사용된 연도(해당월 실적존재)**: {min(used_years)}년 ~ {max(used_years)}년 (총 {len(used_years)}개)")
+    st.markdown(f"**{target_year}년 {target_month}월 사업계획 제출 공급량 합계**: {monthly_total_gj:,.0f} GJ")
+
+    st.markdown("### 🧩 일별 공급량 분배 기준")
+    st.markdown(
+        """
+- 주말/공휴일/명절: 요일 + 그 달의 n번째 기준 평균 (공휴일/명절도 주말 패턴으로 묶음)
+- 평일: '평일1(월·금)', '평일2(화·수·목)'로 구분
+- 기본은 '요일 + 그 달의 n번째(예: 1째 월요일, 2째 월요일...)' 기준 평균
+- 일부 케이스 데이터가 부족하면 '요일 평균'으로 보정
+- 마지막에 일별비율 합계가 1이 되도록 정규화(raw / SUM(raw))
+"""
+    )
+
+    # 표
+    st.markdown("### 📌 3. 일별 계획표(요약)")
+    view = df_plan.sort_values("일자").copy()
+    view_show = view[["일자", "요일", "요일구분", "n번째", "기준키", "일별비율"]].copy()
+    view_show["예상공급량(GJ)"] = view["예상공급량(MJ)"].apply(mj_to_gj)
+    view_show["예상공급량(㎥)"] = view["예상공급량(MJ)"].apply(mj_to_m3)
+    st.dataframe(view_show, use_container_width=True, height=330)
+
+    # 그래프
+    st.markdown("#### 📊 2. 일별 예상 공급량 & 비율 그래프(평일1/평일2/주말 분리)")
+    w1_df = view[view["요일구분"] == "평일1"].copy()
+    w2_df = view[view["요일구분"] == "평일2"].copy()
+    wend_df = view[view["요일구분"] == "주말"].copy()
+
+    fig = go.Figure()
+
+    def _add_bar(_df: pd.DataFrame, _name: str) -> None:
+        # hover에 표시되는 값이 막대 높이(예상공급량 GJ)와 1:1로 일치하도록 고정
+        y_gj = _df["예상공급량(MJ)"].apply(mj_to_gj).astype(float).to_numpy()
+        y_m3 = _df["예상공급량(MJ)"].apply(mj_to_m3).astype(float).to_numpy()
+        x = _df["일"].astype(int).to_numpy()
+        custom = np.column_stack([y_gj, y_m3])
+
+        fig.add_trace(
+            go.Bar(
+                x=x,
+                y=y_gj,
+                name=_name,
+                customdata=custom,
+                hovertemplate=(
+                    "일: %{x}<br>"
+                    "예상공급량: %{customdata[0]:,.0f} GJ<br>"
+                    "예상공급량: %{customdata[1]:,.0f} ㎥"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    _add_bar(w1_df, "평일1(월·금) 예상공급량(GJ)")
+    _add_bar(w2_df, "평일2(화·수·목) 예상공급량(GJ)")
+    _add_bar(wend_df, "주말/공휴일 예상공급량(GJ)")
+
+    fig.add_trace(
+        go.Scatter(
+            x=view["일"].astype(int),
+            y=view["일별비율"].astype(float),
+            mode="lines+markers",
+            name=f"일별비율 (최근{len(used_years)}년 실제 사용)",
+            yaxis="y2",
+            hovertemplate="일: %{x}<br>일별비율: %{y:.4f}<extra></extra>",
+        )
+    )
+
+    fig.update_layout(
+        barmode="group",
+        xaxis_title="일",
+        yaxis=dict(title="예상 공급량(GJ)"),
+        yaxis2=dict(title="일별비율", overlaying="y", side="right", tickformat=".3f"),
+        legend=dict(orientation="v"),
+        height=520,
+        margin=dict(l=40, r=40, t=30, b=40),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 다운로드(월간)
+    st.markdown("### 🧾 5. 일일계획 다운로드(월간)")
+    excel_bytes = export_daily_plan_excel(df_plan, sheet_name=f"{target_year}-{target_month:02d}")
+    st.download_button(
+        "📥 일일공급계획 다운로드(Excel)",
+        data=excel_bytes,
+        file_name=f"일일공급계획_{target_year}_{target_month:02d}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    # 월별 계획표(GJ + ㎥)
+    st.markdown("### 📌 📌 월별 계획량(1~12월) & 연간 총량")
+    # 월별 계획(첫행) GJ 기준으로 보여주고, 아래에 ㎥도 추가
+    month_labels = [f"{m}월" for m in range(1, 13)]
+    # df_plan_month에서 실제 컬럼명 사용
+    # 우선 월컬럼 매핑
+    mcols = []
+    for m in range(1, 13):
+        if f"{m}월" in df_plan_month.columns:
+            mcols.append(f"{m}월")
+        elif str(m) in df_plan_month.columns:
+            mcols.append(str(m))
+        elif f"{m:02d}" in df_plan_month.columns:
+            mcols.append(f"{m:02d}")
         else:
-            st.warning("분석할 과거 데이터가 부족합니다.")
+            mcols.append(None)
 
-    # --- 탭 2 ---
+    annual_col = None
+    for cand in ["연간합계", "연간", "합계", "Total", "TOTAL"]:
+        if cand in df_plan_month.columns:
+            annual_col = cand
+            break
+
+    plan_row = df_plan_month.loc[0, mcols].astype(float).values
+    plan_row_gj = plan_row.copy()
+
+    # ㎥ 환산(계획이 GJ라고 가정)
+    plan_row_m3 = np.array([gj_to_m3(v) for v in plan_row_gj])
+
+    # 표 구성
+    df_plan_view = pd.DataFrame([plan_row_gj, plan_row_m3], columns=[f"{m}월" for m in range(1, 13)])
+    df_plan_view.insert(0, "구분", ["사업계획(월별 계획) - GJ", "사업계획(월별 계획) - ㎥"])
+
+    # 연간합계
+    if annual_col is not None:
+        annual_gj = float(df_plan_month.loc[0, annual_col])
+        annual_m3 = gj_to_m3(annual_gj)
     else:
-        st.title("📊 기온 분석 및 히트맵")
-        if "평균기온(°C)" in df_daily.columns:
-            st.subheader("1. 기온 vs 공급량 상관계수")
-            corr = df_daily[["공급량(MJ)", "평균기온(°C)"]].corr()
-            st.write(corr)
-            
-            st.subheader("2. 일별 평균기온 히트맵")
-            sel_m = st.selectbox("월 선택", range(1, 13))
-            df_hm = df_daily[df_daily["월"] == sel_m]
-            if not df_hm.empty:
-                piv = df_hm.pivot_table(index="일", columns="연도", values="평균기온(°C)")
-                fig_hm = px.imshow(piv, color_continuous_scale="RdBu_r", title=f"{sel_m}월 연도별 기온")
-                st.plotly_chart(fig_hm, use_container_width=True)
-        else:
-            st.info("기온 데이터가 없습니다.")
+        annual_gj = float(np.nansum(plan_row_gj))
+        annual_m3 = float(np.nansum(plan_row_m3))
+
+    df_plan_view["연간합계"] = [annual_gj, annual_m3]
+    st.dataframe(df_plan_view, use_container_width=True, height=140)
+
+    # 연간 다운로드(기존 로직 유지 - 연간 계획은 1~12월 반복 생성)
+    st.markdown("### 🗂️ 6. 일일계획 다운로드(연간)")
+    year_pick = st.selectbox("연간 계획 연도 선택", options=list(range(default_year - 5, default_year + 3)), index=5, key="annual_year")
+    if st.button(f"📥 {year_pick}년 연간 일별공급계획 다운로드(Excel)"):
+        # 1~12월 모두 생성해서 저장
+        out = BytesIO()
+        with pd.ExcelWriter(out, engine="openpyxl") as writer:
+            for m in range(1, 13):
+                # 월 계획량
+                mc = None
+                if f"{m}월" in df_plan_month.columns:
+                    mc = f"{m}월"
+                elif str(m) in df_plan_month.columns:
+                    mc = str(m)
+                elif f"{m:02d}" in df_plan_month.columns:
+                    mc = f"{m:02d}"
+                if mc is None:
+                    continue
+
+                monthly_gj = float(df_plan_month.loc[0, mc])
+                df_m, _ = make_daily_plan_table(df_daily, year_pick, m, monthly_gj, n_years=n_years)
+
+                df_x = df_m.copy()
+                df_x["예상공급량(GJ)"] = df_x["예상공급량(MJ)"].apply(mj_to_gj)
+                df_x["예상공급량(㎥)"] = df_x["예상공급량(MJ)"].apply(mj_to_m3)
+                cols = ["일자", "요일", "요일구분", "n번째", "기준키", "일별비율", "예상공급량(GJ)", "예상공급량(㎥)"]
+                df_x[cols].to_excel(writer, sheet_name=f"{m}월", index=False)
+
+        st.download_button(
+            f"📥 {year_pick}년 연간 일별공급계획 파일 다운로드",
+            data=out.getvalue(),
+            file_name=f"연간_일별공급계획_{year_pick}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+# =========================================================
+# 탭2: Daily-Monthly 공급량 비교
+# =========================================================
+def tab_daily_monthly_compare(df: pd.DataFrame):
+    st.title("도시가스 공급량 — 일별 vs 월별 예측 검증")
+
+    # 상관도 분석(예시: df에 다양한 변수가 있을 때)
+    st.markdown("## 📊 0. 상관도 분석 (공급량 vs 주요 변수)")
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    if len(numeric_cols) >= 2:
+        corr = df[numeric_cols].corr()
+        fig_corr = px.imshow(
+            corr,
+            text_auto=".2f",
+            aspect="equal",  # 정사각형에 가깝게
+            color_continuous_scale="Blues",
+        )
+        fig_corr.update_layout(height=520)
+        st.plotly_chart(fig_corr, use_container_width=True)
+    else:
+        st.info("상관도 분석을 위해서는 숫자형 컬럼이 2개 이상 필요해.")
+
+    # (이 아래는 네 기존 비교 로직이 이어진다고 가정)
+    st.markdown("---")
+    st.info("여기 아래부터는 기존 Daily-Monthly 비교 로직 그대로 유지하면 돼(네 코드 원본에 이미 들어있는 부분).")
+
+
+# =========================================================
+# main
+# =========================================================
+def main():
+    st.set_page_config(page_title="도시가스 공급량 — 일별 vs 월별 예측 검증", layout="wide")
+
+    # 사이드바: 탭 선택
+    st.sidebar.markdown("### 좌측 탭 선택")
+    tab = st.sidebar.radio(
+        "",
+        options=["Daily 공급량 분석", "Daily·Monthly 공급량 비교"],
+        index=0,
+        key="main_tab",
+    )
+
+    # 파일 업로드(일일실적)
+    uploaded_daily = st.sidebar.file_uploader("일일 실적 파일 업로드(XLSX)", type=["xlsx"], key="daily_upload")
+
+    try:
+        df_daily = load_daily_data(uploaded_daily)
+    except Exception as e:
+        st.error(str(e))
+        return
+
+    if tab == "Daily 공급량 분석":
+        tab_daily_plan(df_daily=df_daily)
+    else:
+        tab_daily_monthly_compare(df=df_daily)
+
 
 if __name__ == "__main__":
     main()
