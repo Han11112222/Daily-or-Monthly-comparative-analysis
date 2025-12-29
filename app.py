@@ -11,34 +11,13 @@ import streamlit as st
 from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
 
 # ─────────────────────────────────────────────
-# 1. 기본 설정
+# 1. 기본 설정 및 파일 자동 탐색기
 # ─────────────────────────────────────────────
 st.set_page_config(page_title="도시가스 공급량 예측 시스템", layout="wide")
 
-# 단위 변환 상수
-MJ_PER_NM3 = 42.563
-MJ_TO_GJ = 0.001
-
-def mj_to_gj(val):
-    try: return float(val) * MJ_TO_GJ
-    except: return np.nan
-
-def gj_to_mj(val):
-    try: return float(val) / MJ_TO_GJ
-    except: return np.nan
-
-def mj_to_m3(val):
-    try: return float(val) / MJ_PER_NM3
-    except: return np.nan
-
-# ─────────────────────────────────────────────
-# 2. 파일 자동 탐색기 (형님의 파일명을 우선적으로 찾음)
-# ─────────────────────────────────────────────
 def find_repo_file(filename_candidates):
     """현재 폴더와 상위 폴더를 뒤져서 파일을 찾아냅니다."""
-    # Streamlit Cloud 환경 고려
-    search_dirs = [Path.cwd(), Path(__file__).parent]
-    
+    search_dirs = [Path(__file__).parent, Path.cwd()]
     for folder in search_dirs:
         for name in filename_candidates:
             target = folder / name
@@ -47,13 +26,33 @@ def find_repo_file(filename_candidates):
     return None
 
 # ─────────────────────────────────────────────
-# 3. 데이터 로딩 (컬럼명 '연' vs '연도' 문제 해결)
+# 2. 단위 변환
+# ─────────────────────────────────────────────
+MJ_PER_NM3 = 42.563
+MJ_TO_GJ = 0.001
+
+def mj_to_gj(mj):
+    try: return float(mj) * MJ_TO_GJ
+    except: return np.nan
+
+def gj_to_mj(gj):
+    try: return float(gj) / MJ_TO_GJ
+    except: return np.nan
+
+def mj_to_m3(mj):
+    try: return float(mj) / MJ_PER_NM3
+    except: return np.nan
+
+def gj_to_m3(gj):
+    try: return mj_to_m3(gj_to_mj(gj))
+    except: return np.nan
+
+# ─────────────────────────────────────────────
+# 3. 데이터 로딩 (형님 파일 구조에 맞춤)
 # ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_monthly_plan(uploaded_file):
-    """
-    월별 계획 로딩: '공급량(계획_실적).xlsx' 자동 인식
-    """
+    """월별 계획 로딩: '공급량(계획_실적).xlsx' 자동 인식"""
     df = None
     # 1. 업로드 확인
     if uploaded_file:
@@ -70,66 +69,53 @@ def load_monthly_plan(uploaded_file):
             
     if df is None: return None
 
-    # ★ 핵심 수정: 컬럼명 표준화 ('연' -> '연도')
-    col_map = {}
-    for c in df.columns:
-        cs = str(c).strip().replace(" ", "")
-        if cs == "연": col_map[c] = "연도" # 형님 파일의 '연'을 '연도'로 통일
-        elif cs == "월": col_map[c] = "월"
-        elif "계획" in cs and "MJ" in cs: col_map[c] = "계획량(MJ)"
+    # 컬럼명 정리 (공백 제거)
+    df.columns = [str(c).strip().replace(" ", "") for c in df.columns]
     
-    df = df.rename(columns=col_map)
-    
-    # 데이터 타입 변환
-    if "연도" in df.columns: df["연도"] = pd.to_numeric(df["연도"], errors="coerce")
-    if "월" in df.columns: df["월"] = pd.to_numeric(df["월"], errors="coerce")
-    
+    # '연' -> '연도'로 통일 (코드 내 일관성을 위해)
+    if "연" in df.columns and "연도" not in df.columns:
+        df = df.rename(columns={"연": "연도"})
+        
     return df
 
 @st.cache_data(show_spinner=False)
 def load_daily_data(uploaded_file_daily):
-    """
-    일일 실적 로딩: '공급량(일일실적).xlsx' 자동 인식
-    """
-    df = None
+    """일일 실적 로딩: '공급량(일일실적).xlsx' 자동 인식"""
+    df_raw = None
     if uploaded_file_daily:
-        try: df = pd.read_excel(uploaded_file_daily)
+        try: df_raw = pd.read_excel(uploaded_file_daily)
         except: pass
         
-    if df is None:
+    if df_raw is None:
         candidates = ["공급량(일일실적).xlsx", "일일실적.xlsx"]
         file_path = find_repo_file(candidates)
         if file_path:
-            try: df = pd.read_excel(file_path)
+            try: df_raw = pd.read_excel(file_path)
             except: pass
             
-    if df is None: return None
+    if df_raw is None: return None
 
     # 컬럼 매핑
     col_std = {}
-    for c in df.columns:
+    for c in df_raw.columns:
         cs = str(c).strip().replace(" ", "")
         if cs in ["일자", "date", "Date"]: col_std[c] = "일자"
         if "공급량" in cs and "MJ" in cs: col_std[c] = "공급량(MJ)"
-        if "공급량" in cs and ("GJ" in cs or "Gj" in cs): col_std[c] = "공급량(GJ)"
         if "평균" in cs and ("기온" in cs or "온도" in cs): col_std[c] = "평균기온(°C)"
     
-    df = df.rename(columns=col_std).copy()
+    df = df_raw.rename(columns=col_std).copy()
 
     if "일자" not in df.columns: return None
     
     df["일자"] = pd.to_datetime(df["일자"], errors="coerce")
     df = df.dropna(subset=["일자"])
 
-    # 공급량 정리 (MJ가 없으면 GJ에서 변환)
-    if "공급량(MJ)" not in df.columns and "공급량(GJ)" in df.columns:
-        df["공급량(MJ)"].apply(gj_to_mj)
-    
+    # 공급량 숫자 변환
     if "공급량(MJ)" in df.columns:
         df["공급량(MJ)"] = pd.to_numeric(df["공급량(MJ)"], errors="coerce")
 
-    # 파생 변수 생성
-    df["연도"] = df["일자"].dt.year # '연' 대신 '연도'로 통일
+    # 파생 변수
+    df["연도"] = df["일자"].dt.year # 여기서 '연도' 컬럼 생성
     df["월"] = df["일자"].dt.month
     df["일"] = df["일자"].dt.day
     df["요일"] = df["일자"].dt.day_name()
@@ -137,7 +123,7 @@ def load_daily_data(uploaded_file_daily):
     return df
 
 # ─────────────────────────────────────────────
-# 4. 분석 로직 (형님 코드 로직 유지)
+# 4. 분석 로직 (형님 원본 로직)
 # ─────────────────────────────────────────────
 def nth_weekday_of_month(dt):
     first = dt.replace(day=1)
@@ -200,7 +186,7 @@ def make_daily_plan_table(df_daily, target_year, target_month, monthly_total_gj,
     # 비율 매핑
     df_plan["일별비율"] = df_plan["기준키"].map(ratio_mean)
     
-    # 결측치 보정 (형님 로직)
+    # 결측치 보정
     if df_plan["일별비율"].isna().any():
         weekday_ratio = df_hist.assign(비율=df_hist["공급량(MJ)"]/df_hist.groupby("연도")["공급량(MJ)"].transform("sum")).groupby("요일")["비율"].mean()
         df_plan.loc[df_plan["일별비율"].isna(), "일별비율"] = df_plan.loc[df_plan["일별비율"].isna(), "요일"].map(weekday_ratio)
@@ -216,7 +202,7 @@ def make_daily_plan_table(df_daily, target_year, target_month, monthly_total_gj,
     return df_plan, used_years
 
 # ─────────────────────────────────────────────
-# 5. 엑셀 다운로드 (누적현황 기능)
+# 5. 엑셀 다운로드 (누적현황 기능 포함)
 # ─────────────────────────────────────────────
 def _add_cumulative_sheet(wb, target_year):
     if "누적계획현황" in wb.sheetnames: return
@@ -231,10 +217,12 @@ def _add_cumulative_sheet(wb, target_year):
         c = ws.cell(3, i, h)
         c.fill = fill; c.border = border; c.alignment = Alignment("center")
         
-    # 수식 (B4~F6)
     d = "$B$1"
-    ws["B4"] = f'=IFERROR(XLOOKUP({d},연간!$A:$A,연간!$F:$F),"")' # 예시
-    # ... 공간상 생략 (기존 로직 동일)
+    ws["B4"] = f'=IFERROR(XLOOKUP({d},연간!$A:$A,연간!$F:$F),"")' 
+    ws["C4"] = "=B4"
+    ws["F4"] = '=IFERROR(IF(B4=0,"",C4/B4),"")'
+    for r in range(4, 7):
+        for c in range(1, 7): ws.cell(r, c).border = border
 
 def export_excel(df_plan, sheet_name="일일계획", annual=False, year=None):
     out = BytesIO()
@@ -262,7 +250,7 @@ def main():
     df_daily = load_daily_data(up_daily)
     
     if df_daily is None:
-        st.warning("⚠️ '공급량(일일실적).xlsx' 파일을 찾을 수 없습니다.")
+        st.warning("⚠️ '공급량(일일실적).xlsx' 파일을 찾을 수 없습니다. 깃허브에 파일이 있는지 확인해주세요.")
         return
 
     tab = st.sidebar.radio("메뉴", ["Daily 공급량 분석", "Daily·Monthly 비교"])
@@ -277,7 +265,7 @@ def main():
             st.warning("⚠️ '공급량(계획_실적).xlsx' 파일을 찾을 수 없습니다.")
             return
 
-        # 2. 연도 선택 (일일실적 데이터 기준)
+        # 2. 연도 선택 (★일일 실적 파일 기준★ - KeyError 해결)
         years = sorted(df_daily["연도"].unique())
         default_year = max(years) + 1 if years else 2026
         
@@ -286,31 +274,34 @@ def main():
         with c2: t_month = st.selectbox("계획 월", range(1, 13))
         with c3: n_yrs = st.slider("학습 기간", 1, 5, 3)
 
-        # 3. 월 계획량 추출 (★형님 파일 구조에 맞춤: '연도', '월', '계획량(MJ)' 컬럼)
-        # 먼저 해당 연도/월의 데이터가 있는지 필터링
-        plan_row = pd.DataFrame()
+        # 3. 월 계획량 추출 (★형님 파일 구조: 연도, 월, 계획값★)
+        # 파일에 '연도'와 '월' 컬럼이 있으면 해당 행을 찾음
+        target_row = pd.DataFrame()
         if "연도" in df_plan.columns and "월" in df_plan.columns:
-            plan_row = df_plan[(df_plan["연도"] == t_year) & (df_plan["월"] == t_month)]
+            target_row = df_plan[(df_plan["연도"] == t_year) & (df_plan["월"] == t_month)]
         
-        if plan_row.empty:
-            st.error(f"{t_year}년 {t_month}월 계획 데이터를 찾을 수 없습니다. (계획 파일에 해당 연월 데이터가 있는지 확인하세요)")
+        if target_row.empty:
+            st.error(f"{t_year}년 {t_month}월 계획 데이터를 찾을 수 없습니다.")
             return
         
-        # '계획량(MJ)' 컬럼 찾기 (위에서 rename 했음)
+        # '계획'이라는 글자가 들어간 컬럼 찾기 (사업계획제출_MJ 등)
         val_col = next((c for c in df_plan.columns if "계획" in c), None)
+        if not val_col:
+            # 계획 컬럼이 없으면 3번째 컬럼(숫자일 확률 높음)을 사용
+            val_col = df_plan.columns[2] if len(df_plan.columns) > 2 else None
+
         if val_col:
-            m_total_gj = float(plan_row.iloc[0][val_col])
-            # 만약 단위가 MJ가 아니라면 여기서 변환 필요 (형님 코드는 MJ로 가정)
-            # 만약 숫자가 작으면 GJ로 간주하고 변환
-            if m_total_gj < 1000000: m_total_gj = gj_to_mj(m_total_gj)
+            m_total_gj = float(target_row.iloc[0][val_col])
+            # MJ 단위면 GJ로 변환 (숫자가 크면 MJ로 간주)
+            if m_total_gj > 1000000: m_total_gj = mj_to_gj(m_total_gj)
         else:
-            st.error("계획 파일에서 '계획' 관련 컬럼을 찾을 수 없습니다.")
+            st.error("계획량 컬럼을 찾을 수 없습니다.")
             return
 
-        st.info(f"**{t_year}년 {t_month}월 목표**: {mj_to_gj(m_total_gj):,.0f} GJ")
+        st.info(f"**{t_year}년 {t_month}월 목표**: {m_total_gj:,.0f} GJ")
 
         # 4. 분석 실행
-        df_res, used_yrs = make_daily_plan_table(df_daily, t_year, t_month, mj_to_gj(m_total_gj), n_yrs)
+        df_res, used_yrs = make_daily_plan_table(df_daily, t_year, t_month, m_total_gj, n_yrs)
         
         if df_res is not None:
             st.success(f"✅ 학습 연도: {used_yrs}")
@@ -333,12 +324,11 @@ def main():
             if c_d2.button("📥 연간 전체 생성"):
                 all_dfs = []
                 for m in range(1, 13):
-                    # 연간 루프 (위와 동일한 방식으로 데이터 추출)
-                    p_row = df_plan[(df_plan["연도"] == t_year) & (df_plan["월"] == m)]
-                    if not p_row.empty:
-                        mgj = float(p_row.iloc[0][val_col])
-                        if mgj < 1000000: mgj = gj_to_mj(mgj)
-                        d, _ = make_daily_plan_table(df_daily, t_year, m, mj_to_gj(mgj), n_yrs)
+                    t_row = df_plan[(df_plan["연도"] == t_year) & (df_plan["월"] == m)]
+                    if not t_row.empty:
+                        mgj = float(t_row.iloc[0][val_col])
+                        if mgj > 1000000: mgj = mj_to_gj(mgj)
+                        d, _ = make_daily_plan_table(df_daily, t_year, m, mgj, n_yrs)
                         if d is not None: all_dfs.append(d)
                 
                 if all_dfs:
